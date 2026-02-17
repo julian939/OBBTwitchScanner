@@ -1,5 +1,3 @@
-# app/integrations/discord_bot.py
-
 from __future__ import annotations
 
 import asyncio
