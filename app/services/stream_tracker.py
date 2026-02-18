@@ -11,7 +11,6 @@ from app.integrations.twitch import twitch_api
 
 
 def handle_stream_online(event: dict, db: Session) -> None:
-    """Process stream.online event."""
     streamer_id = event["broadcaster_user_id"]
     streamer_name = event["broadcaster_user_name"]
     streamer_login = event["broadcaster_user_login"]
@@ -30,7 +29,6 @@ def handle_stream_online(event: dict, db: Session) -> None:
     streamer.is_live = True
     streamer.display_name = streamer_name
 
-    # Avoid duplicate stream records
     existing = (
         db.query(Stream)
         .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
@@ -43,8 +41,15 @@ def handle_stream_online(event: dict, db: Session) -> None:
     db.commit()
     print(f"🟢 {streamer_name} went live at {started_at}")
 
-    # Fetch stream info for notification
-    stream_info = twitch_api.get_stream_info(streamer_id)
+    # Fetch stream info with retry (Twitch needs a moment to populate)
+    import time
+    stream_info = None
+    for attempt in range(3):
+        time.sleep(2)
+        stream_info = twitch_api.get_stream_info(streamer_id)
+        if stream_info and stream_info.get("title"):
+            break
+
     queue_live_notification(
         streamer_login=streamer_login,
         streamer_display_name=streamer_name,
@@ -57,7 +62,6 @@ def handle_stream_online(event: dict, db: Session) -> None:
 
 
 def handle_stream_offline(event: dict, db: Session) -> int | None:
-    """Process stream.offline event. Returns duration in minutes."""
     streamer_id = event["broadcaster_user_id"]
     now = datetime.now(timezone.utc)
 
@@ -67,7 +71,7 @@ def handle_stream_offline(event: dict, db: Session) -> int | None:
 
     streamer.is_live = False
 
-    open_stream: Stream | None = (
+    open_stream = (
         db.query(Stream)
         .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
         .order_by(Stream.started_at.desc())
@@ -80,26 +84,22 @@ def handle_stream_offline(event: dict, db: Session) -> int | None:
     if open_stream:
         open_stream.ended_at = now
         started = open_stream.started_at.replace(tzinfo=timezone.utc)
-        duration = (now - started).total_seconds() / 60
-        duration_minutes = int(duration)
+        duration_minutes = int((now - started).total_seconds() / 60)
         open_stream.duration_minutes = duration_minutes
-
-        # Award points
         transactions = award_stream_end_points(streamer_id, open_stream, db)
         points_list = [(tx.reason, tx.points) for tx in transactions]
-
         print(f"🔴 {streamer.display_name} went offline after {duration_minutes} min")
+    else:
+        print(f"⚠️ No open stream for {streamer.display_name}, just marking offline")
 
     db.commit()
 
-    # Get total points for notification
     total_points = (
         db.query(func.sum(PointTransaction.points))
         .filter(PointTransaction.streamer_id == streamer_id)
         .scalar() or 0
     )
 
-    # Queue notification
     if duration_minutes:
         queue_offline_notification(
             streamer_login=streamer.login,

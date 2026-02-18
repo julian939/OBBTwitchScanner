@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     # Twitch
     twitch_client_id: str
     twitch_client_secret: str
-    reconciliation_interval_minutes: int = 15
+    reconciliation_interval_minutes: int = 2
 
     # Webhook
     webhook_secret: str

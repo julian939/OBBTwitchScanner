@@ -11,9 +11,10 @@ from app.database.enums import PointReason
 POINTS_PER_MINUTE = 10
 DAILY_BONUS_POINTS = 500
 LIVE_POINTS_INTERVAL_MINUTES = 5  # Award points every 5 minutes
+EVENT_MULTIPLIER = 2  # Points multiplier during Discord events
 
 
-def award_live_points(db: Session) -> int:
+def award_live_points(db: Session, multiplier: int = 1) -> int:
     """
     Award points for all currently open streams.
     Called periodically by scheduler.
@@ -30,7 +31,6 @@ def award_live_points(db: Session) -> int:
     )
 
     for stream in open_streams:
-        # Calculate minutes since last point award (or stream start)
         if stream.last_points_at:
             since = stream.last_points_at.replace(tzinfo=timezone.utc)
         else:
@@ -41,7 +41,7 @@ def award_live_points(db: Session) -> int:
         if elapsed < LIVE_POINTS_INTERVAL_MINUTES:
             continue
 
-        points = elapsed * POINTS_PER_MINUTE
+        points = elapsed * POINTS_PER_MINUTE * multiplier
 
         tx = PointTransaction(
             streamer_id=stream.streamer_id,
