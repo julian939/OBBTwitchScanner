@@ -9,6 +9,7 @@ from sqlalchemy import func
 from app.config import get_settings
 from app.database.database import SessionLocal
 from app.database.models import Streamer, Stream, PointTransaction
+from app.database.enums import PointReason
 from app.services.notification import (
     notification_queue,
     LiveNotification,
@@ -17,9 +18,8 @@ from app.services.notification import (
 
 settings = get_settings()
 
-# Color Palette
-ACCENT = 0xDB59FF
-OFFLINE_GRAY = 0xC7C4C4
+ACCENT = 0xE91E8C
+OFFLINE_GRAY = 0x2F3136
 
 TEST_PFP = "https://static-cdn.jtvnbs.net/jtv_user_pictures/asmongold-profile_image-f7ddcbd0332f5d28-300x300.png"
 TEST_PREVIEW = "https://static-cdn.jtvnbs.net/previews-ttv/live_user_asmongold-1280x720.jpg"
@@ -161,11 +161,59 @@ class RemoveStreamerModal(ui.Modal, title="Remove Streamer"):
             db.close()
 
 
+class UpdatePointsModal(ui.Modal, title="Update Points"):
+    username = ui.TextInput(label="Twitch Username", placeholder="e.g. gronkh", max_length=50)
+    points = ui.TextInput(label="Points (negative to deduct)", placeholder="e.g. 500 or -200")
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        db = SessionLocal()
+        try:
+            pts = int(self.points.value)
+            streamer = db.query(Streamer).filter(Streamer.login == self.username.value.lower()).first()
+            if not streamer:
+                await interaction.followup.send(f"```diff\n- Streamer '{self.username.value}' not found\n```", ephemeral=True)
+                return
+
+            current = db.query(func.sum(PointTransaction.points)).filter(PointTransaction.streamer_id == streamer.id).scalar() or 0
+
+            if current + pts < 0:
+                await interaction.followup.send(
+                    f"```diff\n- Cannot deduct {abs(pts):,} pts — {streamer.display_name} only has {current:,} pts\n```",
+                    ephemeral=True,
+                )
+                return
+
+            tx = PointTransaction(
+                streamer_id=streamer.id,
+                points=pts,
+                reason=PointReason.MANUAL_ADJUSTMENT,
+            )
+            db.add(tx)
+            db.commit()
+
+            total = current + pts
+            sign = "+" if pts >= 0 else ""
+            embed = discord.Embed(color=ACCENT)
+            embed.description = (
+                f"```diff\n{'+ ' if pts >= 0 else '- '}{abs(pts):,} pts for {streamer.display_name}\n```\n"
+                f"New total: **{total:,}** pts"
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except ValueError:
+            await interaction.followup.send("```diff\n- Invalid number\n```", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
+        finally:
+            db.close()
+
+
 class AdminSelect(ui.Select):
     def __init__(self):
         options = [
             discord.SelectOption(label="Add Streamer", value="add", description="Track a new streamer", emoji="➕"),
             discord.SelectOption(label="Remove Streamer", value="remove", description="Stop tracking a streamer", emoji="➖"),
+            discord.SelectOption(label="Update Points", value="points", description="Add or deduct points", emoji="💰"),
             discord.SelectOption(label="List Streamers", value="list", description="Show all tracked streamers", emoji="📋"),
             discord.SelectOption(label="Sync & Reconcile", value="sync", description="Sync subs and reconcile states", emoji="🔄"),
         ]
@@ -179,6 +227,9 @@ class AdminSelect(ui.Select):
 
         elif choice == "remove":
             await interaction.response.send_modal(RemoveStreamerModal())
+
+        elif choice == "points":
+            await interaction.response.send_modal(UpdatePointsModal())
 
         elif choice == "list":
             db = SessionLocal()
@@ -260,7 +311,6 @@ class StreamTrackerBot(discord.Client):
         print(f"🤖 Discord bot connected as {self.user}")
 
     def has_active_event(self) -> bool:
-        """Check if a Discord scheduled event is currently live."""
         guild = self.get_guild(settings.discord_guild_id)
         if not guild:
             return False
@@ -268,39 +318,6 @@ class StreamTrackerBot(discord.Client):
             if event.status == discord.EventStatus.active:
                 return True
         return False
-
-    # ── Test Notifications ─────────────────────────────────────
-
-    async def _send_test_notifications(self):
-        channel_id = settings.discord_notification_channel_id
-        if not channel_id:
-            return
-        channel = self.get_channel(channel_id)
-        if not channel:
-            return
-        live = LiveNotification(
-            streamer_login="teststreamer",
-            streamer_display_name="TestStreamer",
-            profile_image_url=TEST_PFP,
-            game_name="Just Chatting",
-            title="Testing the Stream Tracker Bot!",
-            thumbnail_url=TEST_PREVIEW,
-            started_at="2026-02-17T12:00:00Z",
-            twitch_url="https://twitch.tv/teststreamer",
-        )
-        await channel.send(content="` ── Test: Live ──── `", embed=self._build_live_embed(live))
-        await asyncio.sleep(1)
-        offline = OfflineNotification(
-            streamer_login="teststreamer",
-            streamer_display_name="TestStreamer",
-            profile_image_url=TEST_PFP,
-            duration_minutes=263,
-            points_awarded=[("stream_time", 2630), ("daily_bonus", 500), ("streak_bonus", 300)],
-            total_points=14580,
-            twitch_url="https://twitch.tv/teststreamer",
-        )
-        await channel.send(content="` ── Test: Offline ── `", embed=self._build_offline_embed(offline))
-        print("📌 Test notifications sent")
 
     # ── Notification Listener ──────────────────────────────────
 
@@ -375,7 +392,7 @@ class StreamTrackerBot(discord.Client):
 
     # ── Build Live Page Embed ──────────────────────────────────
 
-    def _build_live_page(self, streamer, open_stream, pts, db):
+    def _build_live_page(self, streamer, open_stream, pts, db, stream_info=None):
         now = datetime.now(timezone.utc)
         embed = discord.Embed(color=ACCENT)
 
@@ -391,19 +408,9 @@ class StreamTrackerBot(discord.Client):
             icon_url=streamer.profile_image_url or None,
         )
 
-        game = None
-        title = None
-        thumbnail = None
-        try:
-            from app.integrations.twitch import TwitchAPI
-            twitch = TwitchAPI()
-            info = twitch.get_stream_info(streamer.id)
-            if info:
-                game = info.get("game_name")
-                title = info.get("title")
-                thumbnail = info.get("thumbnail_url")
-        except Exception:
-            pass
+        game = stream_info.get("game_name") if stream_info else None
+        title = stream_info.get("title") if stream_info else None
+        thumbnail = stream_info.get("thumbnail_url") if stream_info else None
 
         desc = ""
         if game:
@@ -440,33 +447,42 @@ class StreamTrackerBot(discord.Client):
             await interaction.response.defer()
             db = SessionLocal()
             try:
-                streamers = db.query(Streamer).all()
-                live = [s for s in streamers if s.is_live]
+                from app.utils.categories import is_tracked_category
+                from app.integrations.twitch import TwitchAPI
+                twitch = TwitchAPI()
 
-                if not live:
+                streamers = db.query(Streamer).all()
+                live_streamers = [s for s in streamers if s.is_live]
+
+                tracked_live = []
+                for s in live_streamers:
+                    info = twitch.get_stream_info(s.id)
+                    if info and is_tracked_category(info.get("game_name")):
+                        tracked_live.append((s, info))
+
+                if not tracked_live:
                     embed = discord.Embed(
                         title="OBB Live Streamers",
                         description="```\n  No one is streaming right now.\n```",
                         color=ACCENT,
                     )
-                    embed.set_footer(text="Stream Tracker")
                     embed.timestamp = datetime.now(timezone.utc)
                     await interaction.followup.send(embed=embed)
                     return
 
-                if len(live) == 1:
-                    s = live[0]
+                if len(tracked_live) == 1:
+                    s, info = tracked_live[0]
                     open_stream = db.query(Stream).filter(Stream.streamer_id == s.id, Stream.ended_at.is_(None)).first()
                     pts = db.query(func.sum(PointTransaction.points)).filter(PointTransaction.streamer_id == s.id).scalar() or 0
-                    embed = self._build_live_page(s, open_stream, pts, db)
+                    embed = self._build_live_page(s, open_stream, pts, db, stream_info=info)
                     await interaction.followup.send(embed=embed)
                     return
 
                 pages = []
-                for s in live:
+                for s, info in tracked_live:
                     open_stream = db.query(Stream).filter(Stream.streamer_id == s.id, Stream.ended_at.is_(None)).first()
                     pts = db.query(func.sum(PointTransaction.points)).filter(PointTransaction.streamer_id == s.id).scalar() or 0
-                    pages.append(self._build_live_page(s, open_stream, pts, db))
+                    pages.append(self._build_live_page(s, open_stream, pts, db, stream_info=info))
 
                 view = LivePaginatorView(pages)
                 await interaction.followup.send(embed=pages[0], view=view)
@@ -480,6 +496,8 @@ class StreamTrackerBot(discord.Client):
             await interaction.response.defer()
             db = SessionLocal()
             try:
+                from app.utils.categories import is_streamer_tracked_live
+
                 now = datetime.now(timezone.utc)
 
                 results = (
@@ -496,30 +514,31 @@ class StreamTrackerBot(discord.Client):
 
                 medals = ["🥇", "🥈", "🥉"]
                 total_pts = 0
-                max_pts = results[0].pts if results else 1
 
                 embed = discord.Embed(title="OBB Streamer Leaderboard", color=ACCENT)
 
                 lines = []
                 for i, r in enumerate(results):
-                    medal = medals[i] if i < 3 else f"#{i+1}"
-                    status = "◉" if r.is_live else "○"
+                    medal = medals[i] if i < 3 else f"#{i + 1}"
+                    if r.is_live and is_streamer_tracked_live(r.sid):
+                        status = "◉"
+                    else:
+                        status = "○"
                     mins = get_streamer_total_minutes(r.sid, db, now)
                     streams = get_all_streams_count(r.sid, db)
                     hrs = round(mins / 60, 1)
-                    b = bar(r.pts, max_pts, 10)
 
                     lines.append(
-                        f"**{medal}  {status}  {r.display_name}**\n"
-                        f"` {b} ` **{r.pts:,}** pts  ·  {hrs}h  ·  {streams} streams"
+                        f"{medal}  {status}  **{r.display_name}**\n"
+                        f"```{r.pts:,} pts  ·  {hrs}h  ·  {streams} streams```"
                     )
                     total_pts += r.pts
 
-                embed.description = "\n\n".join(lines) if lines else "No data yet."
+                embed.description = "\n".join(lines) if lines else "```\n  No data yet.\n```"
 
                 total_min = get_global_total_minutes(db, now)
                 total_str = get_global_stream_count(db)
-                embed.set_footer(text=f"{total_pts:,} pts  ·  {total_str} streams  ·  {round(total_min/60,1)}h")
+                embed.set_footer(text=f"{total_pts:,} pts  ·  {total_str} streams  ·  {round(total_min / 60, 1)}h")
                 embed.timestamp = now
                 await interaction.followup.send(embed=embed)
             finally:
@@ -530,12 +549,13 @@ class StreamTrackerBot(discord.Client):
         @self.tree.command(name="streamer", description="Stats for a specific streamer")
         @app_commands.describe(name="Twitch username")
         async def cmd_streamer(interaction, name: str):
+            await interaction.response.defer()
             db = SessionLocal()
             try:
                 now = datetime.now(timezone.utc)
                 s = db.query(Streamer).filter(Streamer.login == name.lower()).first()
                 if not s:
-                    await interaction.response.send_message(f"Streamer `{name}` not found.", ephemeral=True)
+                    await interaction.followup.send(f"Streamer `{name}` not found.", ephemeral=True)
                     return
 
                 all_streams = db.query(Stream).filter(Stream.streamer_id == s.id).all()
@@ -575,12 +595,31 @@ class StreamTrackerBot(discord.Client):
                     color=ACCENT,
                 )
 
-                if is_live and open_stream:
-                    started = open_stream.started_at.replace(tzinfo=timezone.utc)
-                    delta = now - started
-                    embed.description = f"```diff\n+ LIVE  ·  {fmt_dur(int(delta.total_seconds()/60))} uptime\n```"
-                elif is_live:
-                    embed.description = "```diff\n+ LIVE\n```"
+                if is_live:
+                    from app.utils.categories import is_streamer_tracked_live
+                    tracked = is_streamer_tracked_live(s.id)
+
+                    if open_stream:
+                        started = open_stream.started_at.replace(tzinfo=timezone.utc)
+                        delta = now - started
+                        uptime = fmt_dur(int(delta.total_seconds() / 60))
+                        if tracked:
+                            embed.description = f"```diff\n+ LIVE  ·  {uptime} uptime\n```"
+                        else:
+                            from app.integrations.twitch import TwitchAPI
+                            twitch = TwitchAPI()
+                            info = twitch.get_stream_info(s.id)
+                            cat = info.get("game_name", "Unknown") if info else "Unknown"
+                            embed.description = f"```diff\n+ LIVE  ·  {uptime} uptime\n- Category '{cat}' is not tracked\n```"
+                    else:
+                        if tracked:
+                            embed.description = "```diff\n+ LIVE\n```"
+                        else:
+                            from app.integrations.twitch import TwitchAPI
+                            twitch = TwitchAPI()
+                            info = twitch.get_stream_info(s.id)
+                            cat = info.get("game_name", "Unknown") if info else "Unknown"
+                            embed.description = f"```diff\n+ LIVE\n- Category '{cat}' is not tracked\n```"
                 else:
                     embed.description = "```\n  Offline\n```"
 
@@ -615,9 +654,9 @@ class StreamTrackerBot(discord.Client):
                     bd += "```"
                     embed.add_field(name="Points Breakdown", value=bd, inline=False)
 
-                embed.set_footer(text=f"twitch.tv/{s.login}  ·  Stream Tracker")
+                embed.set_footer(text=f"twitch.tv/{s.login}")
                 embed.timestamp = now
-                await interaction.response.send_message(embed=embed)
+                await interaction.followup.send(embed=embed)
             finally:
                 db.close()
 
@@ -625,11 +664,14 @@ class StreamTrackerBot(discord.Client):
 
         @self.tree.command(name="stats", description="Global tracking statistics")
         async def cmd_stats(interaction):
+            await interaction.response.defer()
             db = SessionLocal()
             try:
+                from app.utils.categories import is_streamer_tracked_live
+
                 now = datetime.now(timezone.utc)
                 streamers = db.query(Streamer).all()
-                live = [s for s in streamers if s.is_live]
+                tracked_live = [s for s in streamers if s.is_live and is_streamer_tracked_live(s.id)]
                 total_streams = get_global_stream_count(db)
                 total_min = get_global_total_minutes(db, now)
                 total_pts = db.query(func.sum(PointTransaction.points)).scalar() or 0
@@ -637,20 +679,19 @@ class StreamTrackerBot(discord.Client):
                 embed = discord.Embed(title="OBB Global Stream Stats", color=ACCENT)
                 t = "```\n"
                 t += f"  Streamers     {len(streamers):>8}\n"
-                t += f"  Live Now      {len(live):>8}\n"
+                t += f"  Live Now      {len(tracked_live):>8}\n"
                 t += f"  Streams       {total_streams:>8}\n"
                 t += f"  Hours         {round(total_min/60,1):>7}h\n"
                 t += f"  Points        {total_pts:>8,}\n"
                 t += "```"
                 embed.description = t
 
-                if live:
-                    live_text = "\n".join(f"◉  [{s.display_name}](https://twitch.tv/{s.login})" for s in live)
+                if tracked_live:
+                    live_text = "\n".join(f"◉  [{s.display_name}](https://twitch.tv/{s.login})" for s in tracked_live)
                     embed.add_field(name="Currently Live", value=live_text, inline=False)
 
-                embed.set_footer(text="Stream Tracker")
                 embed.timestamp = now
-                await interaction.response.send_message(embed=embed)
+                await interaction.followup.send(embed=embed)
             finally:
                 db.close()
 

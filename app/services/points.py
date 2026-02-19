@@ -7,19 +7,15 @@ from sqlalchemy import func
 from app.database.models import Streamer, Stream, PointTransaction
 from app.database.enums import PointReason
 
-# Configuration
 POINTS_PER_MINUTE = 10
 DAILY_BONUS_POINTS = 500
-LIVE_POINTS_INTERVAL_MINUTES = 5  # Award points every 5 minutes
-EVENT_MULTIPLIER = 2  # Points multiplier during Discord events
+LIVE_POINTS_INTERVAL_MINUTES = 5
+EVENT_MULTIPLIER = 2
 
 
 def award_live_points(db: Session, multiplier: int = 1) -> int:
-    """
-    Award points for all currently open streams.
-    Called periodically by scheduler.
-    Returns total points awarded.
-    """
+    from app.utils.categories import is_streamer_tracked_live
+
     now = datetime.now(timezone.utc)
     total_awarded = 0
 
@@ -31,6 +27,10 @@ def award_live_points(db: Session, multiplier: int = 1) -> int:
     )
 
     for stream in open_streams:
+        # Only award points if currently in a tracked category
+        if not is_streamer_tracked_live(stream.streamer_id):
+            continue
+
         if stream.last_points_at:
             since = stream.last_points_at.replace(tzinfo=timezone.utc)
         else:
@@ -58,15 +58,10 @@ def award_live_points(db: Session, multiplier: int = 1) -> int:
     return total_awarded
 
 
-def award_stream_end_points(streamer_id: str, stream: Stream, db: Session) -> list[PointTransaction]:
-    """
-    Award remaining time points + bonuses when stream ends.
-    Only awards minutes not yet covered by live points.
-    """
+def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multiplier: int = 1) -> list[PointTransaction]:
     transactions = []
     now = datetime.now(timezone.utc)
 
-    # Calculate remaining minutes since last live points award
     if stream.last_points_at:
         since = stream.last_points_at.replace(tzinfo=timezone.utc)
     else:
@@ -74,9 +69,8 @@ def award_stream_end_points(streamer_id: str, stream: Stream, db: Session) -> li
 
     remaining_minutes = int((now - since).total_seconds() / 60)
 
-    # Award remaining stream time points
     if remaining_minutes > 0:
-        time_points = remaining_minutes * POINTS_PER_MINUTE
+        time_points = remaining_minutes * POINTS_PER_MINUTE * multiplier
         tx = PointTransaction(
             streamer_id=streamer_id,
             points=time_points,
@@ -86,7 +80,6 @@ def award_stream_end_points(streamer_id: str, stream: Stream, db: Session) -> li
         db.add(tx)
         transactions.append(tx)
 
-    # Daily bonus: first completed stream of the day
     if _is_first_stream_today(streamer_id, db):
         bonus = PointTransaction(
             streamer_id=streamer_id,
@@ -97,7 +90,6 @@ def award_stream_end_points(streamer_id: str, stream: Stream, db: Session) -> li
         db.add(bonus)
         transactions.append(bonus)
 
-    # Streak bonus: 3+ consecutive days
     streak = _get_current_streak(streamer_id, db)
     if streak >= 3:
         streak_points = streak * 100
@@ -115,7 +107,6 @@ def award_stream_end_points(streamer_id: str, stream: Stream, db: Session) -> li
 
 
 def _is_first_stream_today(streamer_id: str, db: Session) -> bool:
-    """Check if no daily bonus was awarded today."""
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     count = (
         db.query(func.count(PointTransaction.id))
@@ -130,7 +121,6 @@ def _is_first_stream_today(streamer_id: str, db: Session) -> bool:
 
 
 def _get_current_streak(streamer_id: str, db: Session) -> int:
-    """Calculate consecutive days with at least one completed stream."""
     streams = (
         db.query(Stream)
         .filter(

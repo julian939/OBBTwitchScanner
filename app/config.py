@@ -6,7 +6,9 @@ class Settings(BaseSettings):
     # Twitch
     twitch_client_id: str
     twitch_client_secret: str
+
     reconciliation_interval_minutes: int = 2
+    tracked_categories: list[str] = ["Special Events"] # "Just Chatting", "Oh Baby! Kart", "Shogun Curse", "Bam Bam Boom", "Pawker"
 
     # Webhook
     webhook_secret: str

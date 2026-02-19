@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
-from app.database.models import Streamer, Stream
+from app.database.models import Streamer, Stream, PointTransaction
 from app.integrations.twitch import twitch_api
 from app.services.points import award_stream_end_points
+from app.services.notification import queue_offline_notification
+from app.utils.categories import is_tracked_category
 
 
 def reconcile_live_states(db: Session) -> dict:
@@ -34,30 +37,107 @@ def reconcile_live_states(db: Session) -> dict:
             if open_stream:
                 open_stream.ended_at = now
                 started = open_stream.started_at.replace(tzinfo=timezone.utc)
-                open_stream.duration_minutes = int((now - started).total_seconds() / 60)
+                duration_minutes = int((now - started).total_seconds() / 60)
+                open_stream.duration_minutes = duration_minutes
                 streams_closed += 1
-                award_stream_end_points(streamer.id, open_stream, db)
 
-        # Case 2: Twitch says live but no open stream record
+                try:
+                    from app.integrations.discord_bot import bot
+                    from app.services.points import EVENT_MULTIPLIER
+                    multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
+                except Exception:
+                    multiplier = 1
+
+                transactions = award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
+                points_list = [(tx.reason, tx.points) for tx in transactions]
+
+                total_points = (
+                    db.query(func.sum(PointTransaction.points))
+                    .filter(PointTransaction.streamer_id == streamer.id)
+                    .scalar() or 0
+                )
+
+                if duration_minutes > 0:
+                    queue_offline_notification(
+                        streamer_login=streamer.login,
+                        streamer_display_name=streamer.display_name,
+                        profile_image_url=streamer.profile_image_url or "",
+                        duration_minutes=duration_minutes,
+                        points_awarded=points_list,
+                        total_points=total_points,
+                    )
+
+        # Case 2: Twitch says live
         elif actually_live:
+            if not streamer.is_live:
+                fixed_online += 1
             streamer.is_live = True
-            if not open_stream:
-                if not streamer.is_live:
-                    fixed_online += 1
-                stream_info = _get_stream_info(streamer.id)
-                started_at = stream_info["started_at"] if stream_info else now
-                db.add(Stream(streamer_id=streamer.id, started_at=started_at))
-                streams_opened += 1
 
-        # Case 3: Both offline and no open stream — nothing to do
+            # Only open stream if tracked category
+            if not open_stream:
+                stream_info = _get_stream_info(streamer.id)
+                game_name = stream_info.get("game_name", "") if stream_info else ""
+
+                if is_tracked_category(game_name):
+                    started_at = stream_info["started_at"] if stream_info else now
+                    db.add(Stream(streamer_id=streamer.id, started_at=started_at))
+                    streams_opened += 1
+
+            # Close stream if category switched to untracked
+            elif open_stream:
+                stream_info = _get_stream_info(streamer.id)
+                game_name = stream_info.get("game_name", "") if stream_info else ""
+
+                if not is_tracked_category(game_name):
+                    open_stream.ended_at = now
+                    started = open_stream.started_at.replace(tzinfo=timezone.utc)
+                    duration_minutes = int((now - started).total_seconds() / 60)
+                    open_stream.duration_minutes = duration_minutes
+                    streams_closed += 1
+
+                    try:
+                        from app.integrations.discord_bot import bot
+                        from app.services.points import EVENT_MULTIPLIER
+                        multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
+                    except Exception:
+                        multiplier = 1
+
+                    award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
+
+        # Case 3: Both offline
         else:
             if open_stream:
-                # Orphaned open stream, close it
                 open_stream.ended_at = now
                 started = open_stream.started_at.replace(tzinfo=timezone.utc)
-                open_stream.duration_minutes = int((now - started).total_seconds() / 60)
+                duration_minutes = int((now - started).total_seconds() / 60)
+                open_stream.duration_minutes = duration_minutes
                 streams_closed += 1
-                award_stream_end_points(streamer.id, open_stream, db)
+
+                try:
+                    from app.integrations.discord_bot import bot
+                    from app.services.points import EVENT_MULTIPLIER
+                    multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
+                except Exception:
+                    multiplier = 1
+
+                transactions = award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
+                points_list = [(tx.reason, tx.points) for tx in transactions]
+
+                total_points = (
+                    db.query(func.sum(PointTransaction.points))
+                    .filter(PointTransaction.streamer_id == streamer.id)
+                    .scalar() or 0
+                )
+
+                if duration_minutes > 0:
+                    queue_offline_notification(
+                        streamer_login=streamer.login,
+                        streamer_display_name=streamer.display_name,
+                        profile_image_url=streamer.profile_image_url or "",
+                        duration_minutes=duration_minutes,
+                        points_awarded=points_list,
+                        total_points=total_points,
+                    )
 
     db.commit()
 

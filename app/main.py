@@ -54,6 +54,7 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+
     # Start background tasks
     from app.services.scheduler import periodic_reconciliation, periodic_live_points
     recon_task = asyncio.create_task(periodic_reconciliation())
