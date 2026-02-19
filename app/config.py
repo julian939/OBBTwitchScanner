@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     twitch_client_id: str
     twitch_client_secret: str
 
-    reconciliation_interval_minutes: int = 2
-    tracked_categories: list[str] = ["Special Events"] # "Just Chatting", "Oh Baby! Kart", "Shogun Curse", "Bam Bam Boom", "Pawker"
+    reconciliation_interval_minutes: int = 5
+    tracked_categories: list[str] = ["Oh Baby! Kart", "Shogun Curse", "Bam Bam Boom", "Pawker"]
 
     # Webhook
     webhook_secret: str
@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     discord_bot_token: str = ""
     discord_webhook_url: str = ""
     discord_notification_channel_id: int = 0
-    discord_guild_id: int = 1259284165975871620
-    discord_admin_role_id: int = 1365413035069673644
+    discord_guild_id: int = 0
+    discord_admin_role_ids: list[int] = []
 
     # Database
     database_url: str

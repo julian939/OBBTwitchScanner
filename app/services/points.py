@@ -7,8 +7,8 @@ from sqlalchemy import func
 from app.database.models import Streamer, Stream, PointTransaction
 from app.database.enums import PointReason
 
-POINTS_PER_MINUTE = 10
-DAILY_BONUS_POINTS = 500
+POINTS_PER_MINUTE = 1
+DAILY_BONUS_POINTS = 60
 LIVE_POINTS_INTERVAL_MINUTES = 5
 EVENT_MULTIPLIER = 2
 

@@ -18,7 +18,7 @@ from app.services.notification import (
 
 settings = get_settings()
 
-ACCENT = 0xE91E8C
+ACCENT = 0xa147a1
 OFFLINE_GRAY = 0x2F3136
 
 TEST_PFP = "https://static-cdn.jtvnbs.net/jtv_user_pictures/asmongold-profile_image-f7ddcbd0332f5d28-300x300.png"
@@ -699,10 +699,10 @@ class StreamTrackerBot(discord.Client):
 
         @self.tree.command(name="admin", description="Stream Tracker admin panel")
         async def cmd_admin(interaction):
-            if not settings.discord_admin_role_id:
-                await interaction.response.send_message("Admin role not configured.", ephemeral=True)
+            if not settings.discord_admin_role_ids:
+                await interaction.response.send_message("Admin roles not configured.", ephemeral=True)
                 return
-            if not any(role.id == settings.discord_admin_role_id for role in interaction.user.roles):
+            if not any(role.id in settings.discord_admin_role_ids for role in interaction.user.roles):
                 await interaction.response.send_message("No permission.", ephemeral=True)
                 return
             embed = discord.Embed(title="Admin Panel", description="Select an action below.", color=ACCENT)
