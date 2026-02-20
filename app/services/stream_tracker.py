@@ -7,6 +7,7 @@ from sqlalchemy import func
 from app.database.models import Streamer, Stream, PointTransaction
 from app.services.points import award_stream_end_points
 from app.services.notification import queue_live_notification, queue_offline_notification
+from app.services.roles import assign_live_role, remove_live_role
 from app.integrations.twitch import twitch_api
 from app.utils.categories import is_tracked_category
 
@@ -59,6 +60,10 @@ def handle_stream_online(event: dict, db: Session) -> None:
 
     print(f"🟢 {streamer_name} went live in '{game_name}' at {started_at}")
 
+    # Assign live role
+    if streamer.discord_id:
+        assign_live_role(streamer.discord_id)
+
     queue_live_notification(
         streamer_login=streamer_login,
         streamer_display_name=streamer_name,
@@ -79,6 +84,10 @@ def handle_stream_offline(event: dict, db: Session) -> int | None:
         return None
 
     streamer.is_live = False
+
+    # Remove live role
+    if streamer.discord_id:
+        remove_live_role(streamer.discord_id)
 
     open_stream = (
         db.query(Stream)

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.database.models import Streamer, Stream, Subscription
+from app.database.models import Streamer, Stream, Subscription, PointTransaction
 from app.integrations.twitch import twitch_api
 
 
-def add_streamer(username: str, db: Session) -> dict:
+def add_streamer(username: str, db: Session, discord_id: str | None = None) -> dict:
     """
     Add a streamer to track.
     Creates DB record and EventSub subscriptions.
@@ -24,7 +24,25 @@ def add_streamer(username: str, db: Session) -> dict:
     # Check if already tracked
     existing = db.query(Streamer).filter(Streamer.id == user_id).first()
     if existing:
+        # If streamer exists but has no discord_id, allow linking
+        if discord_id and not existing.discord_id:
+            existing.discord_id = discord_id
+            db.commit()
+            return {
+                "id": existing.id,
+                "login": existing.login,
+                "display_name": existing.display_name,
+                "is_live": existing.is_live,
+                "discord_id": existing.discord_id,
+                "linked": True,
+            }
         raise ValueError(f"Already tracking {display_name}")
+
+    # Check if discord_id is already linked to another streamer
+    if discord_id:
+        existing_link = db.query(Streamer).filter(Streamer.discord_id == discord_id).first()
+        if existing_link:
+            raise ValueError(f"Discord account already linked to {existing_link.display_name}")
 
     # Create streamer record
     streamer = Streamer(
@@ -32,7 +50,8 @@ def add_streamer(username: str, db: Session) -> dict:
         login=login,
         display_name=display_name,
         profile_image_url=profile_image_url,
-        is_live=twitch_api.is_stream_live(user_id)
+        discord_id=discord_id,
+        is_live=twitch_api.is_stream_live(user_id),
     )
     db.add(streamer)
 
@@ -45,7 +64,7 @@ def add_streamer(username: str, db: Session) -> dict:
                 id=result["id"],
                 streamer_id=user_id,
                 type=event_type,
-                status=result["status"]
+                status=result["status"],
             )
             db.add(sub)
 
@@ -55,7 +74,8 @@ def add_streamer(username: str, db: Session) -> dict:
         "id": user_id,
         "login": login,
         "display_name": display_name,
-        "is_live": streamer.is_live
+        "is_live": streamer.is_live,
+        "discord_id": discord_id,
     }
 
 
@@ -74,10 +94,25 @@ def remove_streamer(username: str, db: Session) -> None:
         twitch_api.delete_eventsub_subscription(sub.id)
 
     # Delete from database
+    db.query(PointTransaction).filter(PointTransaction.streamer_id == streamer.id).delete()
     db.query(Subscription).filter(Subscription.streamer_id == streamer.id).delete()
     db.query(Stream).filter(Stream.streamer_id == streamer.id).delete()
     db.query(Streamer).filter(Streamer.id == streamer.id).delete()
     db.commit()
+
+
+def remove_streamer_by_discord_id(discord_id: str, db: Session) -> str:
+    """
+    Stop tracking a streamer by their Discord ID.
+    Returns the display name of the removed streamer.
+    """
+    streamer = db.query(Streamer).filter(Streamer.discord_id == discord_id).first()
+    if not streamer:
+        raise ValueError("This user is not registered as a streamer")
+
+    display_name = streamer.display_name
+    remove_streamer(streamer.login, db)
+    return display_name
 
 
 def sync_subscriptions(db: Session) -> dict:
@@ -102,7 +137,7 @@ def sync_subscriptions(db: Session) -> dict:
                     id=sub["id"],
                     streamer_id=streamer_id,
                     type=sub["type"],
-                    status=sub["status"]
+                    status=sub["status"],
                 )
                 db.add(new_sub)
                 added += 1
@@ -119,5 +154,5 @@ def sync_subscriptions(db: Session) -> dict:
     return {
         "twitch_subscriptions": len(twitch_subs),
         "added_locally": added,
-        "removed_stale": removed
+        "removed_stale": removed,
     }

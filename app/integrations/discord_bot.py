@@ -8,8 +8,8 @@ from sqlalchemy import func
 
 from app.config import get_settings
 from app.database.database import SessionLocal
-from app.database.models import Streamer, Stream, PointTransaction
-from app.database.enums import PointReason
+from app.database.models import Streamer, Stream, PointTransaction, RegistrationRequest
+from app.database.enums import PointReason, RegistrationStatus
 from app.services.notification import (
     notification_queue,
     LiveNotification,
@@ -84,6 +84,13 @@ def get_global_stream_count(db):
     return db.query(func.count(Stream.id)).scalar()
 
 
+def is_admin(interaction: discord.Interaction) -> bool:
+    """Check if the interacting user has an admin role."""
+    if not settings.discord_admin_role_ids:
+        return False
+    return any(role.id in settings.discord_admin_role_ids for role in interaction.user.roles)
+
+
 # ── Live Command Pagination ────────────────────────────────────
 
 class LivePaginatorView(ui.View):
@@ -115,10 +122,304 @@ class LivePaginatorView(ui.View):
         await interaction.response.edit_message(embed=self.pages[self.current], view=self)
 
 
+# ── Registration ───────────────────────────────────────────────
+
+class RegisterModal(ui.Modal, title="Register as Streamer"):
+    twitch_name = ui.TextInput(
+        label="Your Twitch Username",
+        placeholder="e.g. gronkh",
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        db = SessionLocal()
+        try:
+            discord_id = str(interaction.user.id)
+            discord_username = str(interaction.user)
+            twitch_username = self.twitch_name.value.strip().lower()
+
+            # Check if user already has a pending request
+            existing_pending = (
+                db.query(RegistrationRequest)
+                .filter(
+                    RegistrationRequest.discord_id == discord_id,
+                    RegistrationRequest.status == RegistrationStatus.PENDING,
+                )
+                .first()
+            )
+            if existing_pending:
+                await interaction.followup.send(
+                    "```diff\n- You already have a pending registration request\n```",
+                    ephemeral=True,
+                )
+                return
+
+            # Check if already registered as streamer
+            existing_streamer = db.query(Streamer).filter(Streamer.discord_id == discord_id).first()
+            if existing_streamer:
+                await interaction.followup.send(
+                    f"```diff\n- You are already registered as {existing_streamer.display_name}\n```",
+                    ephemeral=True,
+                )
+                return
+
+            # Validate twitch username exists
+            from app.integrations.twitch import twitch_api
+            twitch_user = twitch_api.get_user(twitch_username)
+            if not twitch_user:
+                await interaction.followup.send(
+                    f"```diff\n- Twitch user '{twitch_username}' not found\n```",
+                    ephemeral=True,
+                )
+                return
+
+            # Check if this Twitch account is already tracked
+            existing_twitch = db.query(Streamer).filter(Streamer.login == twitch_username).first()
+            if existing_twitch:
+                if existing_twitch.discord_id:
+                    await interaction.followup.send(
+                        f"```diff\n- '{twitch_user['display_name']}' is already registered by another user\n```",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        f"```diff\n- '{twitch_user['display_name']}' is already being tracked\n```\n"
+                        f"Contact an admin to link your Discord account.",
+                        ephemeral=True,
+                    )
+                return
+
+            # Check if there's already a pending request for this Twitch name
+            existing_twitch_request = (
+                db.query(RegistrationRequest)
+                .filter(
+                    RegistrationRequest.twitch_username == twitch_username,
+                    RegistrationRequest.status == RegistrationStatus.PENDING,
+                )
+                .first()
+            )
+            if existing_twitch_request:
+                await interaction.followup.send(
+                    f"```diff\n- There is already a pending request for '{twitch_user['display_name']}'\n```",
+                    ephemeral=True,
+                )
+                return
+
+            # Create registration request
+            request = RegistrationRequest(
+                discord_id=discord_id,
+                discord_username=discord_username,
+                twitch_username=twitch_username,
+                status=RegistrationStatus.PENDING,
+            )
+            db.add(request)
+            db.commit()
+
+            embed = discord.Embed(color=ACCENT)
+            embed.description = (
+                f"```diff\n+ Registration request submitted!\n```\n"
+                f"Twitch: **{twitch_user['display_name']}** (`{twitch_username}`)\n\n"
+                f"An admin will review your request."
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
+        finally:
+            db.close()
+
+
+# ── Pending Registration Review ────────────────────────────────
+
+class RegistrationReviewView(ui.View):
+    def __init__(self, request_id: int, twitch_username: str, discord_id: str, discord_username: str):
+        super().__init__(timeout=300)
+        self.request_id = request_id
+        self.twitch_username = twitch_username
+        self.discord_id = discord_id
+        self.discord_username = discord_username
+
+    @ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
+    async def approve(self, interaction: discord.Interaction, button):
+        db = SessionLocal()
+        try:
+            req = db.query(RegistrationRequest).filter(RegistrationRequest.id == self.request_id).first()
+            if not req or req.status != RegistrationStatus.PENDING:
+                await interaction.response.send_message("```diff\n- Request no longer pending\n```", ephemeral=True)
+                return
+
+            # Add streamer
+            from app.services.subscription import add_streamer
+            from app.services.reconciliation import reconcile_live_states
+            result = add_streamer(self.twitch_username, db, discord_id=self.discord_id)
+            reconcile_live_states(db)
+
+            # Update request
+            req.status = RegistrationStatus.APPROVED
+            req.reviewed_at = datetime.now(timezone.utc)
+            req.reviewed_by = str(interaction.user)
+            db.commit()
+
+            # Disable buttons and update the original message
+            for item in self.children:
+                item.disabled = True
+
+            result_embed = discord.Embed(color=ACCENT)
+            result_embed.description = (
+                f"~~**Registration Request #{self.request_id}**~~\n\n"
+                f"Discord: <@{self.discord_id}> (`{self.discord_username}`)\n"
+                f"Twitch: `{self.twitch_username}`\n\n"
+                f"```diff\n+ Approved by {interaction.user.display_name}\n```"
+            )
+            await interaction.response.edit_message(embed=result_embed, view=self)
+
+            # DM the user
+            await _send_registration_dm(
+                interaction.guild, self.discord_id,
+                approved=True, twitch_name=result["display_name"],
+            )
+
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"```diff\n- Error: {e}\n```", ephemeral=True)
+            else:
+                await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
+        finally:
+            db.close()
+
+    @ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌")
+    async def reject(self, interaction: discord.Interaction, button):
+        db = SessionLocal()
+        try:
+            req = db.query(RegistrationRequest).filter(RegistrationRequest.id == self.request_id).first()
+            if not req or req.status != RegistrationStatus.PENDING:
+                await interaction.response.send_message("```diff\n- Request no longer pending\n```", ephemeral=True)
+                return
+
+            req.status = RegistrationStatus.REJECTED
+            req.reviewed_at = datetime.now(timezone.utc)
+            req.reviewed_by = str(interaction.user)
+            db.commit()
+
+            # Disable buttons and update the original message
+            for item in self.children:
+                item.disabled = True
+
+            result_embed = discord.Embed(color=OFFLINE_GRAY)
+            result_embed.description = (
+                f"~~**Registration Request #{self.request_id}**~~\n\n"
+                f"Discord: <@{self.discord_id}> (`{self.discord_username}`)\n"
+                f"Twitch: `{self.twitch_username}`\n\n"
+                f"```diff\n- Rejected by {interaction.user.display_name}\n```"
+            )
+            await interaction.response.edit_message(embed=result_embed, view=self)
+
+            # DM the user
+            await _send_registration_dm(
+                interaction.guild, self.discord_id,
+                approved=False, twitch_name=self.twitch_username,
+            )
+
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"```diff\n- Error: {e}\n```", ephemeral=True)
+            else:
+                await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
+        finally:
+            db.close()
+
+
+async def _send_registration_dm(guild, discord_id: str, approved: bool, twitch_name: str):
+    """Send a DM to the user about their registration result."""
+    try:
+        member = guild.get_member(int(discord_id))
+        if not member:
+            member = await guild.fetch_member(int(discord_id))
+        if not member:
+            return
+
+        if approved:
+            embed = discord.Embed(color=ACCENT)
+            embed.description = (
+                f"```diff\n+ Your registration has been approved!\n```\n"
+                f"Your Twitch account **{twitch_name}** is now being tracked.\n"
+                f"Happy streaming! 🎮"
+            )
+        else:
+            embed = discord.Embed(color=OFFLINE_GRAY)
+            embed.description = (
+                f"```diff\n- Your registration has been rejected\n```\n"
+                f"Your request to register **{twitch_name}** was not approved.\n"
+                f"Contact an admin if you think this is a mistake."
+            )
+
+        await member.send(embed=embed)
+    except discord.Forbidden:
+        print(f"⚠️ Cannot DM user {discord_id} (DMs disabled)")
+    except Exception as e:
+        print(f"❌ Failed to send registration DM: {e}")
+
+
 # ── Admin UI ───────────────────────────────────────────────────
 
 class AddStreamerModal(ui.Modal, title="Add Streamer"):
     username = ui.TextInput(label="Twitch Username", placeholder="e.g. gronkh", max_length=50)
+    discord_user_id = ui.TextInput(
+        label="Discord User ID (optional)",
+        placeholder="e.g. 123456789012345678",
+        required=False,
+        max_length=20,
+    )
+
+    def __init__(self, prefill_discord_id: str | None = None):
+        super().__init__()
+        if prefill_discord_id:
+            self.discord_user_id.default = prefill_discord_id
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        db = SessionLocal()
+        try:
+            discord_id = self.discord_user_id.value.strip() or None
+            if discord_id:
+                # Validate it's a number
+                try:
+                    int(discord_id)
+                except ValueError:
+                    await interaction.followup.send("```diff\n- Invalid Discord User ID\n```", ephemeral=True)
+                    return
+
+            from app.services.subscription import add_streamer
+            from app.services.reconciliation import reconcile_live_states
+            result = add_streamer(self.username.value, db, discord_id=discord_id)
+            reconcile_live_states(db)
+            embed = discord.Embed(color=ACCENT)
+            desc = (
+                f"```diff\n+ Added {result['display_name']}\n```\n"
+                f"Login: `{result['login']}`  ·  ID: `{result['id']}`\n"
+                f"Status: {'◉ Live' if result['is_live'] else '○ Offline'}"
+            )
+            if discord_id:
+                desc += f"\nDiscord: <@{discord_id}>"
+            if result.get("linked"):
+                desc += "\n*(Discord account linked to existing streamer)*"
+            embed.description = desc
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except (ValueError, Exception) as e:
+            await interaction.followup.send(f"```diff\n- {e}\n```", ephemeral=True)
+        finally:
+            db.close()
+
+
+class AddStreamerContextModal(ui.Modal, title="Add as Streamer"):
+    """Modal that opens from context menu - Discord ID is pre-filled."""
+    username = ui.TextInput(label="Twitch Username", placeholder="e.g. gronkh", max_length=50)
+
+    def __init__(self, target_discord_id: str, target_name: str):
+        super().__init__()
+        self.target_discord_id = target_discord_id
+        self.target_name = target_name
 
     async def on_submit(self, interaction):
         await interaction.response.defer(ephemeral=True)
@@ -126,14 +427,18 @@ class AddStreamerModal(ui.Modal, title="Add Streamer"):
         try:
             from app.services.subscription import add_streamer
             from app.services.reconciliation import reconcile_live_states
-            result = add_streamer(self.username.value, db)
+            result = add_streamer(self.username.value, db, discord_id=self.target_discord_id)
             reconcile_live_states(db)
             embed = discord.Embed(color=ACCENT)
-            embed.description = (
+            desc = (
                 f"```diff\n+ Added {result['display_name']}\n```\n"
                 f"Login: `{result['login']}`  ·  ID: `{result['id']}`\n"
+                f"Discord: <@{self.target_discord_id}>\n"
                 f"Status: {'◉ Live' if result['is_live'] else '○ Offline'}"
             )
+            if result.get("linked"):
+                desc += "\n*(Discord account linked to existing streamer)*"
+            embed.description = desc
             await interaction.followup.send(embed=embed, ephemeral=True)
         except (ValueError, Exception) as e:
             await interaction.followup.send(f"```diff\n- {e}\n```", ephemeral=True)
@@ -209,12 +514,14 @@ class UpdatePointsModal(ui.Modal, title="Update Points"):
 
 
 class AdminSelect(ui.Select):
-    def __init__(self):
+    def __init__(self, pending_count: int = 0):
+        pending_label = f"Pending Registrations ({pending_count})" if pending_count else "Pending Registrations"
         options = [
             discord.SelectOption(label="Add Streamer", value="add", description="Track a new streamer", emoji="➕"),
             discord.SelectOption(label="Remove Streamer", value="remove", description="Stop tracking a streamer", emoji="➖"),
             discord.SelectOption(label="Update Points", value="points", description="Add or deduct points", emoji="💰"),
             discord.SelectOption(label="List Streamers", value="list", description="Show all tracked streamers", emoji="📋"),
+            discord.SelectOption(label=pending_label, value="pending", description="Review registration requests", emoji="📝"),
             discord.SelectOption(label="Sync & Reconcile", value="sync", description="Sync subs and reconcile states", emoji="🔄"),
         ]
         super().__init__(placeholder="Select an action...", options=options)
@@ -239,14 +546,53 @@ class AdminSelect(ui.Select):
                     await interaction.response.send_message("No streamers tracked.", ephemeral=True)
                     return
                 t = "```\n"
-                t += f" {'Status':<8} {'Name':<18} {'Login':<16} {'ID'}\n"
-                t += f" {'─'*8} {'─'*18} {'─'*16} {'─'*12}\n"
+                t += f" {'Status':<8} {'Name':<18} {'Login':<16} {'Discord'}\n"
+                t += f" {'─'*8} {'─'*18} {'─'*16} {'─'*20}\n"
                 for s in streamers:
                     st = "◉ Live" if s.is_live else "○ Off"
-                    t += f" {st:<8} {s.display_name:<18} {s.login:<16} {s.id}\n"
+                    dc = f"<@{s.discord_id}>" if s.discord_id else "—"
+                    t += f" {st:<8} {s.display_name:<18} {s.login:<16} {s.discord_id or '—'}\n"
                 t += "```"
                 embed = discord.Embed(title=f"Tracked Streamers  ·  {len(streamers)}", description=t, color=ACCENT)
                 await interaction.response.send_message(embed=embed, ephemeral=True)
+            finally:
+                db.close()
+
+        elif choice == "pending":
+            await interaction.response.defer(ephemeral=True)
+            db = SessionLocal()
+            try:
+                pending = (
+                    db.query(RegistrationRequest)
+                    .filter(RegistrationRequest.status == RegistrationStatus.PENDING)
+                    .order_by(RegistrationRequest.created_at.asc())
+                    .all()
+                )
+
+                if not pending:
+                    embed = discord.Embed(color=ACCENT)
+                    embed.description = "```\n  No pending registration requests.\n```"
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                    return
+
+                for req in pending:
+                    embed = discord.Embed(color=ACCENT)
+                    embed.description = (
+                        f"**Registration Request #{req.id}**\n\n"
+                        f"Discord: <@{req.discord_id}> (`{req.discord_username}`)\n"
+                        f"Twitch: `{req.twitch_username}`\n"
+                        f"Submitted: <t:{int(req.created_at.replace(tzinfo=timezone.utc).timestamp())}:R>"
+                    )
+                    view = RegistrationReviewView(
+                        request_id=req.id,
+                        twitch_username=req.twitch_username,
+                        discord_id=req.discord_id,
+                        discord_username=req.discord_username,
+                    )
+                    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+            except Exception as e:
+                await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
             finally:
                 db.close()
 
@@ -281,9 +627,9 @@ class AdminSelect(ui.Select):
 
 
 class AdminView(ui.View):
-    def __init__(self):
+    def __init__(self, pending_count: int = 0):
         super().__init__(timeout=120)
-        self.add_item(AdminSelect())
+        self.add_item(AdminSelect(pending_count=pending_count))
 
 
 # ── Bot ────────────────────────────────────────────────────────
@@ -439,6 +785,62 @@ class StreamTrackerBot(discord.Client):
             traceback.print_exception(type(error), error, error.__traceback__)
             if not interaction.response.is_done():
                 await interaction.response.send_message("An error occurred.", ephemeral=True)
+
+        # ── /register ──
+
+        @self.tree.command(name="register", description="Register as a streamer")
+        async def cmd_register(interaction: discord.Interaction):
+            await interaction.response.send_modal(RegisterModal())
+
+        # ── Context Menu: Add as Streamer ──
+
+        @self.tree.context_menu(name="Add as Streamer")
+        async def ctx_add_streamer(interaction: discord.Interaction, member: discord.Member):
+            if not is_admin(interaction):
+                await interaction.response.send_message("No permission.", ephemeral=True)
+                return
+            modal = AddStreamerContextModal(
+                target_discord_id=str(member.id),
+                target_name=str(member),
+            )
+            await interaction.response.send_modal(modal)
+
+        # ── Context Menu: Remove Streamer ──
+
+        @self.tree.context_menu(name="Remove Streamer")
+        async def ctx_remove_streamer(interaction: discord.Interaction, member: discord.Member):
+            if not is_admin(interaction):
+                await interaction.response.send_message("No permission.", ephemeral=True)
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            db = SessionLocal()
+            try:
+                streamer = db.query(Streamer).filter(Streamer.discord_id == str(member.id)).first()
+                if not streamer:
+                    await interaction.followup.send(
+                        f"```diff\n- {member.display_name} is not registered as a streamer\n```",
+                        ephemeral=True,
+                    )
+                    return
+
+                from app.services.subscription import remove_streamer
+                from app.services.subscription import sync_subscriptions
+                display_name = streamer.display_name
+                remove_streamer(streamer.login, db)
+                sync_subscriptions(db)
+
+                embed = discord.Embed(color=ACCENT)
+                embed.description = (
+                    f"```diff\n- Removed {display_name}\n```\n"
+                    f"Discord: {member.mention}  ·  Twitch: `{streamer.login}`"
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+
+            except (ValueError, Exception) as e:
+                await interaction.followup.send(f"```diff\n- {e}\n```", ephemeral=True)
+            finally:
+                db.close()
 
         # ── /live ──
 
@@ -699,14 +1101,20 @@ class StreamTrackerBot(discord.Client):
 
         @self.tree.command(name="admin", description="Stream Tracker admin panel")
         async def cmd_admin(interaction):
-            if not settings.discord_admin_role_ids:
-                await interaction.response.send_message("Admin roles not configured.", ephemeral=True)
-                return
-            if not any(role.id in settings.discord_admin_role_ids for role in interaction.user.roles):
+            if not is_admin(interaction):
                 await interaction.response.send_message("No permission.", ephemeral=True)
                 return
-            embed = discord.Embed(title="Admin Panel", description="Select an action below.", color=ACCENT)
-            await interaction.response.send_message(embed=embed, view=AdminView(), ephemeral=True)
+            db = SessionLocal()
+            try:
+                pending_count = (
+                    db.query(func.count(RegistrationRequest.id))
+                    .filter(RegistrationRequest.status == RegistrationStatus.PENDING)
+                    .scalar()
+                )
+                embed = discord.Embed(title="Admin Panel", description="Select an action below.", color=ACCENT)
+                await interaction.response.send_message(embed=embed, view=AdminView(pending_count=pending_count), ephemeral=True)
+            finally:
+                db.close()
 
 
 bot = StreamTrackerBot()

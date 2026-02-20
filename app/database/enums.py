@@ -6,3 +6,9 @@ class PointReason(str, Enum):
     DAILY_BONUS = "daily_bonus"
     STREAK_BONUS = "streak_bonus"
     MANUAL_ADJUSTMENT = "manual_adjustment"
+
+
+class RegistrationStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"

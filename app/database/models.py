@@ -11,7 +11,8 @@ class Streamer(Base):
     id = Column(String, primary_key=True)
     login = Column(String, unique=True, index=True)
     display_name = Column(String)
-    profile_image_url = Column(String, nullable=True)  # NEW
+    profile_image_url = Column(String, nullable=True)
+    discord_id = Column(String, nullable=True, unique=True)
     is_live = Column(Boolean, default=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -28,10 +29,11 @@ class Stream(Base):
     started_at = Column(DateTime)
     ended_at = Column(DateTime, nullable=True)
     duration_minutes = Column(Integer, nullable=True)
-    last_points_at = Column(DateTime, nullable=True)  # NEW
+    last_points_at = Column(DateTime, nullable=True)
 
     streamer = relationship("Streamer", back_populates="streams")
     point_transactions = relationship("PointTransaction", back_populates="stream")
+
 
 class PointTransaction(Base):
     __tablename__ = "point_transactions"
@@ -57,6 +59,19 @@ class Subscription(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     streamer = relationship("Streamer", back_populates="subscriptions")
+
+
+class RegistrationRequest(Base):
+    __tablename__ = "registration_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    discord_id = Column(String, index=True)
+    discord_username = Column(String)
+    twitch_username = Column(String)
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    reviewed_at = Column(DateTime, nullable=True)
+    reviewed_by = Column(String, nullable=True)
 
 
 class ProcessedMessage(Base):

@@ -8,6 +8,7 @@ from app.database.models import Streamer, Stream, PointTransaction
 from app.integrations.twitch import twitch_api
 from app.services.points import award_stream_end_points
 from app.services.notification import queue_offline_notification
+from app.services.roles import assign_live_role, remove_live_role
 from app.utils.categories import is_tracked_category
 
 
@@ -33,6 +34,10 @@ def reconcile_live_states(db: Session) -> dict:
         if streamer.is_live and not actually_live:
             streamer.is_live = False
             fixed_offline += 1
+
+            # Remove live role
+            if streamer.discord_id:
+                remove_live_role(streamer.discord_id)
 
             if open_stream:
                 open_stream.ended_at = now
@@ -83,6 +88,14 @@ def reconcile_live_states(db: Session) -> dict:
                     db.add(Stream(streamer_id=streamer.id, started_at=started_at))
                     streams_opened += 1
 
+                    # Assign live role
+                    if streamer.discord_id:
+                        assign_live_role(streamer.discord_id)
+                else:
+                    # Live but not tracked category -> remove role
+                    if streamer.discord_id:
+                        remove_live_role(streamer.discord_id)
+
             # Close stream if category switched to untracked
             elif open_stream:
                 stream_info = _get_stream_info(streamer.id)
@@ -95,6 +108,10 @@ def reconcile_live_states(db: Session) -> dict:
                     open_stream.duration_minutes = duration_minutes
                     streams_closed += 1
 
+                    # Remove live role (untracked category)
+                    if streamer.discord_id:
+                        remove_live_role(streamer.discord_id)
+
                     try:
                         from app.integrations.discord_bot import bot
                         from app.services.points import EVENT_MULTIPLIER
@@ -103,9 +120,17 @@ def reconcile_live_states(db: Session) -> dict:
                         multiplier = 1
 
                     award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
+                else:
+                    # Still tracked -> ensure role is assigned
+                    if streamer.discord_id:
+                        assign_live_role(streamer.discord_id)
 
         # Case 3: Both offline
         else:
+            # Ensure live role is removed
+            if streamer.discord_id:
+                remove_live_role(streamer.discord_id)
+
             if open_stream:
                 open_stream.ended_at = now
                 started = open_stream.started_at.replace(tzinfo=timezone.utc)

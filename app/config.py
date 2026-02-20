@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     discord_notification_channel_id: int = 0
     discord_guild_id: int = 0
     discord_admin_role_ids: list[int] = []
+    discord_live_role_id: int = 0
 
     # Database
     database_url: str
