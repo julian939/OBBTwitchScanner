@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from fastapi import APIRouter, Request, Response, Depends, HTTPException
+from starlette.requests import ClientDisconnect
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_db
@@ -24,8 +25,12 @@ async def twitch_webhook(request: Request, db: Session = Depends(get_db)):
     signature = request.headers.get("Twitch-Eventsub-Message-Signature", "")
     message_type = request.headers.get("Twitch-Eventsub-Message-Type", "")
 
-    # Get raw body
-    body_bytes = await request.body()
+    # Get raw body (handle client disconnect gracefully)
+    try:
+        body_bytes = await request.body()
+    except ClientDisconnect:
+        print("⚠️ Twitch webhook: client disconnected before body was read")
+        return Response(status_code=200)
 
     # Validate headers
     if not all([message_id, timestamp, signature, message_type]):
