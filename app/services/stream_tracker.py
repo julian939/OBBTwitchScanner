@@ -75,6 +75,20 @@ def handle_stream_online(event: dict, db: Session) -> None:
     )
 
 
+def _get_stream_points_summary(stream_id: int, db: Session) -> list:
+    """Aggregate ALL points for a stream (including periodic live points)."""
+    rows = (
+        db.query(
+            PointTransaction.reason,
+            func.sum(PointTransaction.points).label("total"),
+        )
+        .filter(PointTransaction.stream_id == stream_id)
+        .group_by(PointTransaction.reason)
+        .all()
+    )
+    return [(row.reason, row.total) for row in rows]
+
+
 def handle_stream_offline(event: dict, db: Session) -> int | None:
     streamer_id = event["broadcaster_user_id"]
     now = datetime.now(timezone.utc)
@@ -112,8 +126,11 @@ def handle_stream_offline(event: dict, db: Session) -> int | None:
         except Exception:
             multiplier = 1
 
-        transactions = award_stream_end_points(streamer_id, open_stream, db, multiplier=multiplier)
-        points_list = [(tx.reason, tx.points) for tx in transactions]
+        award_stream_end_points(streamer_id, open_stream, db, multiplier=multiplier)
+
+        # Get ALL points for this stream (periodic + end-of-stream)
+        points_list = _get_stream_points_summary(open_stream.id, db)
+
         print(f"🔴 {streamer.display_name} went offline after {duration_minutes} min")
     else:
         print(f"⚠️ No open stream for {streamer.display_name}, just marking offline")
