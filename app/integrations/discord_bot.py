@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import discord
 from discord import app_commands, ui
 from datetime import datetime, timezone, timedelta
@@ -21,8 +22,10 @@ settings = get_settings()
 ACCENT = 0xa147a1
 OFFLINE_GRAY = 0x2F3136
 
-TEST_PFP = "https://static-cdn.jtvnbs.net/jtv_user_pictures/asmongold-profile_image-f7ddcbd0332f5d28-300x300.png"
-TEST_PREVIEW = "https://static-cdn.jtvnbs.net/previews-ttv/live_user_asmongold-1280x720.jpg"
+LEADERBOARD_PAGE_SIZE = 5
+
+def random_tip() -> str:
+    return random.choice(settings.discord_footer_tips)
 
 
 def fmt_dur(minutes):
@@ -32,11 +35,12 @@ def fmt_dur(minutes):
     return f"{h}h {m}m" if m else f"{h}h"
 
 
-def bar(value, maximum, length=10):
+def bar(value, maximum, length=20):
     if maximum <= 0:
         return "░" * length
     f = min(int((value / maximum) * length), length)
-    return "▓" * max(f, 1) + "░" * (length - max(f, 1))
+    f = max(f, 1) if value > 0 else 0
+    return "█" * f + "░" * (length - f)
 
 
 def get_live_minutes(stream, now=None):
@@ -84,16 +88,31 @@ def get_global_stream_count(db):
     return db.query(func.count(Stream.id)).scalar()
 
 
+def get_streak(streamer_id, db):
+    """Get current streak for a streamer."""
+    from app.services.points import _get_current_streak
+    return _get_current_streak(streamer_id, db)
+
+
 def is_admin(interaction: discord.Interaction) -> bool:
-    """Check if the interacting user has an admin role."""
     if not settings.discord_admin_role_ids:
         return False
     return any(role.id in settings.discord_admin_role_ids for role in interaction.user.roles)
 
 
-# ── Live Command Pagination ────────────────────────────────────
+def get_game_channel(bot_instance, game_name: str):
+    """Get the Discord channel for a game, or None."""
+    if not game_name or not settings.discord_game_channels:
+        return None
+    channel_id = settings.discord_game_channels.get(game_name)
+    if not channel_id:
+        return None
+    return bot_instance.get_channel(channel_id)
 
-class LivePaginatorView(ui.View):
+
+# ── Pagination View ───────────────────────────────────────────
+
+class PaginatorView(ui.View):
     def __init__(self, pages, current=0):
         super().__init__(timeout=300)
         self.pages = pages
@@ -122,6 +141,42 @@ class LivePaginatorView(ui.View):
         await interaction.response.edit_message(embed=self.pages[self.current], view=self)
 
 
+class ImagePaginatorView(ui.View):
+    """Paginator for image-based pages (e.g. leaderboard)."""
+
+    def __init__(self, image_bytes_list, current=0):
+        super().__init__(timeout=300)
+        self.image_bytes_list = image_bytes_list  # list of PNG bytes
+        self.current = current
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_btn.disabled = self.current == 0
+        self.next_btn.disabled = self.current >= len(self.image_bytes_list) - 1
+        self.counter.label = f"{self.current + 1}/{len(self.image_bytes_list)}"
+
+    def _current_file(self):
+        import io
+        buf = io.BytesIO(self.image_bytes_list[self.current])
+        return discord.File(buf, filename="leaderboard.png")
+
+    @ui.button(label="◂", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction, button):
+        self.current = max(0, self.current - 1)
+        self._update_buttons()
+        await interaction.response.edit_message(attachments=[self._current_file()], view=self)
+
+    @ui.button(label="1/1", style=discord.ButtonStyle.secondary, disabled=True)
+    async def counter(self, interaction, button):
+        pass
+
+    @ui.button(label="▸", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction, button):
+        self.current = min(len(self.image_bytes_list) - 1, self.current + 1)
+        self._update_buttons()
+        await interaction.response.edit_message(attachments=[self._current_file()], view=self)
+
+
 # ── Registration ───────────────────────────────────────────────
 
 class RegisterModal(ui.Modal, title="Register as Streamer"):
@@ -139,7 +194,6 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
             discord_username = str(interaction.user)
             twitch_username = self.twitch_name.value.strip().lower()
 
-            # Check if user already has a pending request
             existing_pending = (
                 db.query(RegistrationRequest)
                 .filter(
@@ -155,7 +209,6 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
                 )
                 return
 
-            # Check if already registered as streamer
             existing_streamer = db.query(Streamer).filter(Streamer.discord_id == discord_id).first()
             if existing_streamer:
                 await interaction.followup.send(
@@ -164,7 +217,6 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
                 )
                 return
 
-            # Validate twitch username exists
             from app.integrations.twitch import twitch_api
             twitch_user = twitch_api.get_user(twitch_username)
             if not twitch_user:
@@ -174,7 +226,6 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
                 )
                 return
 
-            # Check if this Twitch account is already tracked
             existing_twitch = db.query(Streamer).filter(Streamer.login == twitch_username).first()
             if existing_twitch:
                 if existing_twitch.discord_id:
@@ -190,7 +241,6 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
                     )
                 return
 
-            # Check if there's already a pending request for this Twitch name
             existing_twitch_request = (
                 db.query(RegistrationRequest)
                 .filter(
@@ -206,7 +256,6 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
                 )
                 return
 
-            # Create registration request
             request = RegistrationRequest(
                 discord_id=discord_id,
                 discord_username=discord_username,
@@ -249,19 +298,16 @@ class RegistrationReviewView(ui.View):
                 await interaction.response.send_message("```diff\n- Request no longer pending\n```", ephemeral=True)
                 return
 
-            # Add streamer
             from app.services.subscription import add_streamer
             from app.services.reconciliation import reconcile_live_states
             result = add_streamer(self.twitch_username, db, discord_id=self.discord_id)
             reconcile_live_states(db)
 
-            # Update request
             req.status = RegistrationStatus.APPROVED
             req.reviewed_at = datetime.now(timezone.utc)
             req.reviewed_by = str(interaction.user)
             db.commit()
 
-            # Disable buttons and update the original message
             for item in self.children:
                 item.disabled = True
 
@@ -274,7 +320,6 @@ class RegistrationReviewView(ui.View):
             )
             await interaction.response.edit_message(embed=result_embed, view=self)
 
-            # DM the user
             await _send_registration_dm(
                 interaction.guild, self.discord_id,
                 approved=True, twitch_name=result["display_name"],
@@ -302,7 +347,6 @@ class RegistrationReviewView(ui.View):
             req.reviewed_by = str(interaction.user)
             db.commit()
 
-            # Disable buttons and update the original message
             for item in self.children:
                 item.disabled = True
 
@@ -315,7 +359,6 @@ class RegistrationReviewView(ui.View):
             )
             await interaction.response.edit_message(embed=result_embed, view=self)
 
-            # DM the user
             await _send_registration_dm(
                 interaction.guild, self.discord_id,
                 approved=False, twitch_name=self.twitch_username,
@@ -331,7 +374,6 @@ class RegistrationReviewView(ui.View):
 
 
 async def _send_registration_dm(guild, discord_id: str, approved: bool, twitch_name: str):
-    """Send a DM to the user about their registration result."""
     try:
         member = guild.get_member(int(discord_id))
         if not member:
@@ -383,7 +425,6 @@ class AddStreamerModal(ui.Modal, title="Add Streamer"):
         try:
             discord_id = self.discord_user_id.value.strip() or None
             if discord_id:
-                # Validate it's a number
                 try:
                     int(discord_id)
                 except ValueError:
@@ -413,7 +454,6 @@ class AddStreamerModal(ui.Modal, title="Add Streamer"):
 
 
 class AddStreamerContextModal(ui.Modal, title="Add as Streamer"):
-    """Modal that opens from context menu - Discord ID is pre-filled."""
     username = ui.TextInput(label="Twitch Username", placeholder="e.g. gronkh", max_length=50)
 
     def __init__(self, target_discord_id: str, target_name: str):
@@ -498,7 +538,6 @@ class UpdatePointsModal(ui.Modal, title="Update Points"):
             db.commit()
 
             total = current + pts
-            sign = "+" if pts >= 0 else ""
             embed = discord.Embed(color=ACCENT)
             embed.description = (
                 f"```diff\n{'+ ' if pts >= 0 else '- '}{abs(pts):,} pts for {streamer.display_name}\n```\n"
@@ -550,7 +589,6 @@ class AdminSelect(ui.Select):
                 t += f" {'─'*8} {'─'*18} {'─'*16} {'─'*20}\n"
                 for s in streamers:
                     st = "◉ Live" if s.is_live else "○ Off"
-                    dc = f"<@{s.discord_id}>" if s.discord_id else "—"
                     t += f" {st:<8} {s.display_name:<18} {s.login:<16} {s.discord_id or '—'}\n"
                 t += "```"
                 embed = discord.Embed(title=f"Tracked Streamers  ·  {len(streamers)}", description=t, color=ACCENT)
@@ -669,16 +707,15 @@ class StreamTrackerBot(discord.Client):
 
     async def _notification_listener(self):
         await self.wait_until_ready()
-        channel_id = settings.discord_notification_channel_id
-        if not channel_id:
-            return
-        channel = self.get_channel(channel_id)
-        if not channel:
-            return
-        print(f"📡 Listening on #{channel.name}")
+        print(f"📡 Notification listener ready")
         while True:
             try:
                 n = await notification_queue.get()
+                channel = get_game_channel(self, n.game_name)
+                if not channel:
+                    print(f"⚠️ No channel configured for '{n.game_name}', skipping notification")
+                    continue
+
                 if isinstance(n, LiveNotification):
                     await channel.send(embed=self._build_live_embed(n))
                 elif isinstance(n, OfflineNotification):
@@ -708,7 +745,7 @@ class StreamTrackerBot(discord.Client):
             embed.set_image(url=n.thumbnail_url)
         if n.profile_image_url:
             embed.set_thumbnail(url=n.profile_image_url)
-        embed.set_footer(text=f"twitch.tv/{n.streamer_login}")
+        embed.set_footer(text=random_tip())
         embed.timestamp = datetime.now(timezone.utc)
         return embed
 
@@ -732,7 +769,7 @@ class StreamTrackerBot(discord.Client):
         embed.description = "\n".join(lines)
         if n.profile_image_url:
             embed.set_thumbnail(url=n.profile_image_url)
-        embed.set_footer(text=f"twitch.tv/{n.streamer_login}")
+        embed.set_footer(text=random_tip())
         embed.timestamp = datetime.now(timezone.utc)
         return embed
 
@@ -773,6 +810,31 @@ class StreamTrackerBot(discord.Client):
         embed.set_footer(text=f"⏱ {uptime}  ·  twitch.tv/{streamer.login}")
         embed.timestamp = now
         return embed
+
+    # ── Leaderboard Builder ────────────────────────────────────
+
+    def _build_leaderboard_images(self, entries):
+        """Build paginated leaderboard images as list of PNG bytes."""
+        from app.integrations.leaderboard_image import render_leaderboard
+        import io
+
+        if not entries:
+            # Return empty state as embed fallback
+            return None
+
+        total_pages = (len(entries) + LEADERBOARD_PAGE_SIZE - 1) // LEADERBOARD_PAGE_SIZE
+        image_bytes = []
+
+        for page_start in range(0, len(entries), LEADERBOARD_PAGE_SIZE):
+            page_entries = entries[page_start:page_start + LEADERBOARD_PAGE_SIZE]
+            page_num = page_start // LEADERBOARD_PAGE_SIZE + 1
+
+            img = render_leaderboard(page_entries, page=page_num, total_pages=total_pages)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            image_bytes.append(buf.getvalue())
+
+        return image_bytes
 
     # ── Slash Commands ─────────────────────────────────────────
 
@@ -868,6 +930,7 @@ class StreamTrackerBot(discord.Client):
                         description="```\n  No one is streaming right now.\n```",
                         color=ACCENT,
                     )
+                    embed.set_footer(text=random_tip())
                     embed.timestamp = datetime.now(timezone.utc)
                     await interaction.followup.send(embed=embed)
                     return
@@ -886,7 +949,7 @@ class StreamTrackerBot(discord.Client):
                     pts = db.query(func.sum(PointTransaction.points)).filter(PointTransaction.streamer_id == s.id).scalar() or 0
                     pages.append(self._build_live_page(s, open_stream, pts, db, stream_info=info))
 
-                view = LivePaginatorView(pages)
+                view = PaginatorView(pages)
                 await interaction.followup.send(embed=pages[0], view=view)
             finally:
                 db.close()
@@ -914,35 +977,44 @@ class StreamTrackerBot(discord.Client):
                     .all()
                 )
 
-                medals = ["🥇", "🥈", "🥉"]
-                total_pts = 0
-
-                embed = discord.Embed(title="OBB Streamer Leaderboard", color=ACCENT)
-
-                lines = []
+                entries = []
                 for i, r in enumerate(results):
-                    medal = medals[i] if i < 3 else f"#{i + 1}"
-                    if r.is_live and is_streamer_tracked_live(r.sid):
-                        status = "◉"
-                    else:
-                        status = "○"
+                    tracked_live = r.is_live and is_streamer_tracked_live(r.sid)
                     mins = get_streamer_total_minutes(r.sid, db, now)
                     streams = get_all_streams_count(r.sid, db)
-                    hrs = round(mins / 60, 1)
+                    streak = get_streak(r.sid, db)
 
-                    lines.append(
-                        f"{medal}  {status}  **{r.display_name}**\n"
-                        f"```{r.pts:,} pts  ·  {hrs}h  ·  {streams} streams```"
-                    )
-                    total_pts += r.pts
+                    entries.append({
+                        "rank": i + 1,
+                        "display_name": r.display_name,
+                        "login": r.login,
+                        "is_live": r.is_live,
+                        "tracked_live": tracked_live,
+                        "pts": r.pts,
+                        "hours": round(mins / 60, 1),
+                        "streams": streams,
+                        "streak": streak,
+                    })
 
-                embed.description = "\n".join(lines) if lines else "```\n  No data yet.\n```"
+                image_bytes = self._build_leaderboard_images(entries)
 
-                total_min = get_global_total_minutes(db, now)
-                total_str = get_global_stream_count(db)
-                embed.set_footer(text=f"{total_pts:,} pts  ·  {total_str} streams  ·  {round(total_min / 60, 1)}h")
-                embed.timestamp = now
-                await interaction.followup.send(embed=embed)
+                if image_bytes is None:
+                    embed = discord.Embed(title="OBB Streamer Leaderboard", color=ACCENT)
+                    embed.description = "```\n  No data yet.\n```"
+                    embed.set_footer(text=random_tip())
+                    embed.timestamp = now
+                    await interaction.followup.send(embed=embed)
+                elif len(image_bytes) == 1:
+                    import io
+                    buf = io.BytesIO(image_bytes[0])
+                    file = discord.File(buf, filename="leaderboard.png")
+                    await interaction.followup.send(file=file)
+                else:
+                    view = ImagePaginatorView(image_bytes)
+                    import io
+                    buf = io.BytesIO(image_bytes[0])
+                    file = discord.File(buf, filename="leaderboard.png")
+                    await interaction.followup.send(file=file, view=view)
             finally:
                 db.close()
 
@@ -1056,7 +1128,7 @@ class StreamTrackerBot(discord.Client):
                     bd += "```"
                     embed.add_field(name="Points Breakdown", value=bd, inline=False)
 
-                embed.set_footer(text=f"twitch.tv/{s.login}")
+                embed.set_footer(text=random_tip())
                 embed.timestamp = now
                 await interaction.followup.send(embed=embed)
             finally:
@@ -1092,10 +1164,59 @@ class StreamTrackerBot(discord.Client):
                     live_text = "\n".join(f"◉  [{s.display_name}](https://twitch.tv/{s.login})" for s in tracked_live)
                     embed.add_field(name="Currently Live", value=live_text, inline=False)
 
+                embed.set_footer(text=random_tip())
                 embed.timestamp = now
                 await interaction.followup.send(embed=embed)
             finally:
                 db.close()
+
+        # ── /info ──
+
+        @self.tree.command(name="info", description="How the stream tracker works")
+        async def cmd_info(interaction):
+            from app.services.points import (
+                POINTS_PER_MINUTE,
+                DAILY_BONUS_POINTS,
+                STREAK_BONUS_MULTIPLIER,
+                EVENT_MULTIPLIER,
+            )
+
+            categories = settings.tracked_categories
+            cat_str = "  ·  ".join(categories) if categories else "All categories"
+
+            embed = discord.Embed(title="ℹ️  OBB Stream Tracker", color=ACCENT)
+
+            desc = f"**Tracked Categories**\n"
+            desc += f"```\n{cat_str}\n```\n"
+
+            desc += f"**Points System**\n"
+            desc += f"```\n"
+            desc += f"  Stream Time     {POINTS_PER_MINUTE} point per minute\n"
+            desc += f"  Daily Bonus     {DAILY_BONUS_POINTS} points (first stream of the day)\n"
+            desc += f"  Streak Bonus    streak days × {STREAK_BONUS_MULTIPLIER} points\n"
+            desc += f"                  (3+ day streak, once per day)\n"
+            desc += f"  Event Bonus     earned points multiplied by {EVENT_MULTIPLIER}\n"
+            desc += f"                  (during active Discord events)\n"
+            desc += f"```\n"
+
+            desc += f"**How to Join**\n"
+            desc += f"```\n"
+            desc += f"  1. Use /register and enter your Twitch username\n"
+            desc += f"  2. An admin will review and approve your request\n"
+            desc += f"  3. Once approved, your streams are automatically\n"
+            desc += f"     tracked and you start earning points\n"
+            desc += f"```\n"
+
+            desc += (
+                f"Only streams in the listed categories count toward "
+                f"points and stats. Switching to an untracked category "
+                f"mid-stream will pause tracking."
+            )
+
+            embed.description = desc
+            embed.set_footer(text=random_tip())
+            embed.timestamp = datetime.now(timezone.utc)
+            await interaction.response.send_message(embed=embed)
 
         # ── /admin ──
 

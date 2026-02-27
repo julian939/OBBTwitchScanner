@@ -6,11 +6,15 @@ from sqlalchemy import func
 
 from app.database.models import Streamer, Stream, PointTransaction
 from app.database.enums import PointReason
+from app.config import get_settings
 
-POINTS_PER_MINUTE = 1
-DAILY_BONUS_POINTS = 60
-LIVE_POINTS_INTERVAL_MINUTES = 5
-EVENT_MULTIPLIER = 2
+settings = get_settings()
+
+POINTS_PER_MINUTE = settings.points_per_minute
+DAILY_BONUS_POINTS = settings.daily_bonus_points
+STREAK_BONUS_MULTIPLIER = settings.streak_bonus_multiplier
+LIVE_POINTS_INTERVAL_MINUTES = settings.live_points_interval_minutes
+EVENT_MULTIPLIER = settings.event_multiplier
 
 
 def award_live_points(db: Session, multiplier: int = 1) -> int:
@@ -62,6 +66,7 @@ def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multi
     transactions = []
     now = datetime.now(timezone.utc)
 
+    # Remaining stream time points
     if stream.last_points_at:
         since = stream.last_points_at.replace(tzinfo=timezone.utc)
     else:
@@ -80,6 +85,7 @@ def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multi
         db.add(tx)
         transactions.append(tx)
 
+    # Daily bonus (once per day)
     if _is_first_stream_today(streamer_id, db):
         bonus = PointTransaction(
             streamer_id=streamer_id,
@@ -90,9 +96,10 @@ def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multi
         db.add(bonus)
         transactions.append(bonus)
 
+    # Streak bonus (once per day, requires 3+ day streak)
     streak = _get_current_streak(streamer_id, db)
-    if streak >= 3:
-        streak_points = streak * 100
+    if streak >= 3 and _is_first_streak_bonus_today(streamer_id, db):
+        streak_points = streak * STREAK_BONUS_MULTIPLIER
         streak_tx = PointTransaction(
             streamer_id=streamer_id,
             points=streak_points,
@@ -113,6 +120,21 @@ def _is_first_stream_today(streamer_id: str, db: Session) -> bool:
         .filter(
             PointTransaction.streamer_id == streamer_id,
             PointTransaction.reason == PointReason.DAILY_BONUS,
+            PointTransaction.created_at >= today_start,
+        )
+        .scalar()
+    )
+    return count == 0
+
+
+def _is_first_streak_bonus_today(streamer_id: str, db: Session) -> bool:
+    """Check if streak bonus was already awarded today."""
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    count = (
+        db.query(func.count(PointTransaction.id))
+        .filter(
+            PointTransaction.streamer_id == streamer_id,
+            PointTransaction.reason == PointReason.STREAK_BONUS,
             PointTransaction.created_at >= today_start,
         )
         .scalar()

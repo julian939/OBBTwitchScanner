@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     reconciliation_interval_minutes: int = 5
     tracked_categories: list[str] = ["Oh Baby! Kart", "Shogun Curse", "Bam Bam Boom", "Pawker"]
 
+    # Points
+    points_per_minute: int = 1
+    daily_bonus_points: int = 60
+    streak_bonus_multiplier: int = 10
+    event_multiplier: int = 2
+    live_points_interval_minutes: int = 5
+
     # Webhook
     webhook_secret: str
     webhook_callback_url: str
@@ -19,11 +26,18 @@ class Settings(BaseSettings):
 
     # Discord
     discord_bot_token: str = ""
-    discord_webhook_url: str = ""
-    discord_notification_channel_id: int = 0
     discord_guild_id: int = 0
     discord_admin_role_ids: list[int] = []
     discord_live_role_id: int = 0
+    discord_game_channels: dict[str, int] = {}
+    discord_footer_tips: list[str] = [
+        "Use /register to become a tracked streamer",
+        "Use /live to see who's currently streaming",
+        "Use /streamer <name> for detailed stats",
+        "Use /info to learn how points work",
+        "Stream daily to build your streak bonus 🔥",
+        "First stream of the day earns a daily bonus!",
+    ]
 
     # Database
     database_url: str

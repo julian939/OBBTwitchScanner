@@ -26,6 +26,7 @@ class Stream(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     streamer_id = Column(String, ForeignKey("streamers.id"), index=True)
+    game_name = Column(String, nullable=True)
     started_at = Column(DateTime)
     ended_at = Column(DateTime, nullable=True)
     duration_minutes = Column(Integer, nullable=True)

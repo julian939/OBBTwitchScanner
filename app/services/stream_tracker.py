@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -10,6 +11,17 @@ from app.services.notification import queue_live_notification, queue_offline_not
 from app.services.roles import assign_live_role, remove_live_role
 from app.integrations.twitch import twitch_api
 from app.utils.categories import is_tracked_category
+
+# Prevents race condition between webhook and reconciliation
+_stream_locks: dict[str, threading.Lock] = {}
+_locks_lock = threading.Lock()
+
+
+def _get_streamer_lock(streamer_id: str) -> threading.Lock:
+    with _locks_lock:
+        if streamer_id not in _stream_locks:
+            _stream_locks[streamer_id] = threading.Lock()
+        return _stream_locks[streamer_id]
 
 
 def handle_stream_online(event: dict, db: Session) -> None:
@@ -48,13 +60,19 @@ def handle_stream_online(event: dict, db: Session) -> None:
         print(f"⏭️ {streamer_name} went live in '{game_name}' (untracked)")
         return
 
-    existing = (
-        db.query(Stream)
-        .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
-        .first()
-    )
-    if not existing:
-        stream = Stream(streamer_id=streamer_id, started_at=started_at)
+    # Lock per streamer to prevent race with reconciliation
+    lock = _get_streamer_lock(streamer_id)
+    with lock:
+        existing = (
+            db.query(Stream)
+            .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
+            .first()
+        )
+        if existing:
+            print(f"ℹ️ {streamer_name} stream already tracked (reconciliation caught it)")
+            return
+
+        stream = Stream(streamer_id=streamer_id, started_at=started_at, game_name=game_name)
         db.add(stream)
         db.commit()
 
@@ -144,10 +162,14 @@ def handle_stream_offline(event: dict, db: Session) -> int | None:
     )
 
     if duration_minutes:
+        # Use the game_name from the stream start for channel routing
+        stream_game = open_stream.game_name or "" if open_stream else ""
+
         queue_offline_notification(
             streamer_login=streamer.login,
             streamer_display_name=streamer.display_name,
             profile_image_url=streamer.profile_image_url or "",
+            game_name=stream_game,
             duration_minutes=duration_minutes,
             points_awarded=points_list,
             total_points=total_points,

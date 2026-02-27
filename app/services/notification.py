@@ -23,6 +23,7 @@ class OfflineNotification:
     streamer_login: str
     streamer_display_name: str
     profile_image_url: str
+    game_name: str
     duration_minutes: int
     points_awarded: list  # List of (reason, points) tuples
     total_points: int
@@ -65,6 +66,7 @@ def queue_offline_notification(
     streamer_login: str,
     streamer_display_name: str,
     profile_image_url: str,
+    game_name: str,
     duration_minutes: int,
     points_awarded: list,
     total_points: int,
@@ -74,6 +76,7 @@ def queue_offline_notification(
         streamer_login=streamer_login,
         streamer_display_name=streamer_display_name,
         profile_image_url=profile_image_url or "",
+        game_name=game_name,
         duration_minutes=duration_minutes,
         points_awarded=points_awarded,
         total_points=total_points,

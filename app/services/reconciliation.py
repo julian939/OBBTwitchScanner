@@ -7,8 +7,9 @@ from sqlalchemy import func
 from app.database.models import Streamer, Stream, PointTransaction
 from app.integrations.twitch import twitch_api
 from app.services.points import award_stream_end_points
-from app.services.notification import queue_offline_notification
+from app.services.notification import queue_offline_notification, queue_live_notification
 from app.services.roles import assign_live_role, remove_live_role
+from app.services.stream_tracker import _get_streamer_lock
 from app.utils.categories import is_tracked_category
 
 
@@ -24,6 +25,44 @@ def _get_stream_points_summary(stream_id: int, db: Session) -> list:
         .all()
     )
     return [(row.reason, row.total) for row in rows]
+
+
+def _close_stream_and_notify(streamer, open_stream, now, db):
+    """Close an open stream, award points, and queue offline notification."""
+    open_stream.ended_at = now
+    started = open_stream.started_at.replace(tzinfo=timezone.utc)
+    duration_minutes = int((now - started).total_seconds() / 60)
+    open_stream.duration_minutes = duration_minutes
+
+    try:
+        from app.integrations.discord_bot import bot
+        from app.services.points import EVENT_MULTIPLIER
+        multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
+    except Exception:
+        multiplier = 1
+
+    award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
+
+    points_list = _get_stream_points_summary(open_stream.id, db)
+
+    total_points = (
+        db.query(func.sum(PointTransaction.points))
+        .filter(PointTransaction.streamer_id == streamer.id)
+        .scalar() or 0
+    )
+
+    if duration_minutes > 0:
+        queue_offline_notification(
+            streamer_login=streamer.login,
+            streamer_display_name=streamer.display_name,
+            profile_image_url=streamer.profile_image_url or "",
+            game_name=open_stream.game_name or "",
+            duration_minutes=duration_minutes,
+            points_awarded=points_list,
+            total_points=total_points,
+        )
+
+    return duration_minutes
 
 
 def reconcile_live_states(db: Session) -> dict:
@@ -49,44 +88,12 @@ def reconcile_live_states(db: Session) -> dict:
             streamer.is_live = False
             fixed_offline += 1
 
-            # Remove live role
             if streamer.discord_id:
                 remove_live_role(streamer.discord_id)
 
             if open_stream:
-                open_stream.ended_at = now
-                started = open_stream.started_at.replace(tzinfo=timezone.utc)
-                duration_minutes = int((now - started).total_seconds() / 60)
-                open_stream.duration_minutes = duration_minutes
+                _close_stream_and_notify(streamer, open_stream, now, db)
                 streams_closed += 1
-
-                try:
-                    from app.integrations.discord_bot import bot
-                    from app.services.points import EVENT_MULTIPLIER
-                    multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
-                except Exception:
-                    multiplier = 1
-
-                award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
-
-                # Get ALL points for this stream (periodic + end-of-stream)
-                points_list = _get_stream_points_summary(open_stream.id, db)
-
-                total_points = (
-                    db.query(func.sum(PointTransaction.points))
-                    .filter(PointTransaction.streamer_id == streamer.id)
-                    .scalar() or 0
-                )
-
-                if duration_minutes > 0:
-                    queue_offline_notification(
-                        streamer_login=streamer.login,
-                        streamer_display_name=streamer.display_name,
-                        profile_image_url=streamer.profile_image_url or "",
-                        duration_minutes=duration_minutes,
-                        points_awarded=points_list,
-                        total_points=total_points,
-                    )
 
         # Case 2: Twitch says live
         elif actually_live:
@@ -94,93 +101,68 @@ def reconcile_live_states(db: Session) -> dict:
                 fixed_online += 1
             streamer.is_live = True
 
-            # Only open stream if tracked category
             if not open_stream:
                 stream_info = _get_stream_info(streamer.id)
                 game_name = stream_info.get("game_name", "") if stream_info else ""
 
                 if is_tracked_category(game_name):
-                    started_at = stream_info["started_at"] if stream_info else now
-                    db.add(Stream(streamer_id=streamer.id, started_at=started_at))
-                    streams_opened += 1
+                    # Lock per streamer to prevent race with webhook
+                    lock = _get_streamer_lock(streamer.id)
+                    with lock:
+                        # Re-check inside lock
+                        recheck = (
+                            db.query(Stream)
+                            .filter(Stream.streamer_id == streamer.id, Stream.ended_at.is_(None))
+                            .first()
+                        )
+                        if recheck:
+                            continue  # Webhook already handled it
 
-                    # Assign live role
+                        started_at = stream_info["started_at"] if stream_info else now
+                        db.add(Stream(streamer_id=streamer.id, started_at=started_at, game_name=game_name))
+                        db.flush()
+                        streams_opened += 1
+
                     if streamer.discord_id:
                         assign_live_role(streamer.discord_id)
+
+                    # Send live notification (webhook missed this)
+                    started_at_str = started_at.isoformat() if hasattr(started_at, 'isoformat') else str(started_at)
+                    queue_live_notification(
+                        streamer_login=streamer.login,
+                        streamer_display_name=streamer.display_name,
+                        profile_image_url=streamer.profile_image_url or "",
+                        game_name=game_name,
+                        title=stream_info.get("title", "") if stream_info else "",
+                        thumbnail_url=stream_info.get("thumbnail_url", "") if stream_info else "",
+                        started_at=started_at_str,
+                    )
                 else:
-                    # Live but not tracked category -> remove role
                     if streamer.discord_id:
                         remove_live_role(streamer.discord_id)
 
-            # Close stream if category switched to untracked
             elif open_stream:
                 stream_info = _get_stream_info(streamer.id)
                 game_name = stream_info.get("game_name", "") if stream_info else ""
 
                 if not is_tracked_category(game_name):
-                    open_stream.ended_at = now
-                    started = open_stream.started_at.replace(tzinfo=timezone.utc)
-                    duration_minutes = int((now - started).total_seconds() / 60)
-                    open_stream.duration_minutes = duration_minutes
+                    _close_stream_and_notify(streamer, open_stream, now, db)
                     streams_closed += 1
 
-                    # Remove live role (untracked category)
                     if streamer.discord_id:
                         remove_live_role(streamer.discord_id)
-
-                    try:
-                        from app.integrations.discord_bot import bot
-                        from app.services.points import EVENT_MULTIPLIER
-                        multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
-                    except Exception:
-                        multiplier = 1
-
-                    award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
                 else:
-                    # Still tracked -> ensure role is assigned
                     if streamer.discord_id:
                         assign_live_role(streamer.discord_id)
 
         # Case 3: Both offline
         else:
-            # Ensure live role is removed
             if streamer.discord_id:
                 remove_live_role(streamer.discord_id)
 
             if open_stream:
-                open_stream.ended_at = now
-                started = open_stream.started_at.replace(tzinfo=timezone.utc)
-                duration_minutes = int((now - started).total_seconds() / 60)
-                open_stream.duration_minutes = duration_minutes
+                _close_stream_and_notify(streamer, open_stream, now, db)
                 streams_closed += 1
-
-                try:
-                    from app.integrations.discord_bot import bot
-                    from app.services.points import EVENT_MULTIPLIER
-                    multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
-                except Exception:
-                    multiplier = 1
-
-                award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
-
-                # Get ALL points for this stream (periodic + end-of-stream)
-                points_list = _get_stream_points_summary(open_stream.id, db)
-
-                total_points = (
-                    db.query(func.sum(PointTransaction.points))
-                    .filter(PointTransaction.streamer_id == streamer.id)
-                    .scalar() or 0
-                )
-
-                if duration_minutes > 0:
-                    queue_offline_notification(
-                        streamer_login=streamer.login,
-                        streamer_display_name=streamer.display_name,
-                        profile_image_url=streamer.profile_image_url or "",
-                        duration_minutes=duration_minutes,
-                        points_awarded=points_list,
-                        total_points=total_points,
-                    )
 
     db.commit()
 
@@ -209,4 +191,5 @@ def _get_stream_info(user_id: str) -> dict | None:
         "started_at": datetime.fromisoformat(started_at_str.replace("Z", "+00:00")),
         "title": data[0].get("title", ""),
         "game_name": data[0].get("game_name", ""),
+        "thumbnail_url": data[0].get("thumbnail_url", ""),
     }
