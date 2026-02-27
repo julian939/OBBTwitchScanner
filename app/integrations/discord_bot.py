@@ -117,12 +117,20 @@ class PaginatorView(ui.View):
         super().__init__(timeout=300)
         self.pages = pages
         self.current = current
+        self.message = None
         self._update_buttons()
 
     def _update_buttons(self):
         self.prev_btn.disabled = self.current == 0
         self.next_btn.disabled = self.current >= len(self.pages) - 1
         self.counter.label = f"{self.current + 1}/{len(self.pages)}"
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass
 
     @ui.button(label="◂", style=discord.ButtonStyle.secondary)
     async def prev_btn(self, interaction, button):
@@ -148,6 +156,7 @@ class ImagePaginatorView(ui.View):
         super().__init__(timeout=300)
         self.image_bytes_list = image_bytes_list  # list of PNG bytes
         self.current = current
+        self.message = None  # set after sending
         self._update_buttons()
 
     def _update_buttons(self):
@@ -159,6 +168,13 @@ class ImagePaginatorView(ui.View):
         import io
         buf = io.BytesIO(self.image_bytes_list[self.current])
         return discord.File(buf, filename="leaderboard.png")
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass
 
     @ui.button(label="◂", style=discord.ButtonStyle.secondary)
     async def prev_btn(self, interaction, button):
@@ -950,7 +966,8 @@ class StreamTrackerBot(discord.Client):
                     pages.append(self._build_live_page(s, open_stream, pts, db, stream_info=info))
 
                 view = PaginatorView(pages)
-                await interaction.followup.send(embed=pages[0], view=view)
+                msg = await interaction.followup.send(embed=pages[0], view=view)
+                view.message = msg
             finally:
                 db.close()
 
@@ -1014,7 +1031,8 @@ class StreamTrackerBot(discord.Client):
                     import io
                     buf = io.BytesIO(image_bytes[0])
                     file = discord.File(buf, filename="leaderboard.png")
-                    await interaction.followup.send(file=file, view=view)
+                    msg = await interaction.followup.send(file=file, view=view)
+                    view.message = msg
             finally:
                 db.close()
 
