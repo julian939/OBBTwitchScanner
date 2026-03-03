@@ -4,6 +4,7 @@ import asyncio
 from app.database.database import SessionLocal
 from app.services.reconciliation import reconcile_live_states
 from app.services.points import award_live_points, LIVE_POINTS_INTERVAL_MINUTES, EVENT_MULTIPLIER
+from app.services.roles import sync_leaderboard_roles
 from app.config import get_settings
 
 settings = get_settings()
@@ -18,6 +19,9 @@ async def periodic_reconciliation():
         try:
             result = reconcile_live_states(db)
             print(f"✅ Reconciliation done: {result}")
+
+            # Sync leaderboard roles after streams close (points change)
+            await sync_leaderboard_roles(db)
         except Exception as e:
             print(f"❌ Reconciliation failed: {e}")
         finally:
@@ -38,6 +42,9 @@ async def periodic_live_points():
             if awarded > 0:
                 suffix = f" (x{multiplier} event bonus!)" if multiplier > 1 else ""
                 print(f"💰 Live points awarded: {awarded}{suffix}")
+
+                # Sync leaderboard roles after points awarded
+                await sync_leaderboard_roles(db)
         except Exception as e:
             print(f"❌ Live points failed: {e}")
         finally:

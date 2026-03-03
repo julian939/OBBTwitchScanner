@@ -9,7 +9,7 @@ from app.integrations.twitch import twitch_api
 from app.services.points import award_stream_end_points
 from app.services.notification import queue_offline_notification, queue_live_notification
 from app.services.roles import assign_live_role, remove_live_role
-from app.services.stream_tracker import _get_streamer_lock
+from app.services.stream_tracker import _get_streamer_lock, _is_live_cooldown_active, _is_offline_too_short
 from app.utils.categories import is_tracked_category
 
 
@@ -52,15 +52,18 @@ def _close_stream_and_notify(streamer, open_stream, now, db):
     )
 
     if duration_minutes > 0:
-        queue_offline_notification(
-            streamer_login=streamer.login,
-            streamer_display_name=streamer.display_name,
-            profile_image_url=streamer.profile_image_url or "",
-            game_name=open_stream.game_name or "",
-            duration_minutes=duration_minutes,
-            points_awarded=points_list,
-            total_points=total_points,
-        )
+        if _is_offline_too_short(duration_minutes):
+            print(f"⏳ {streamer.display_name} offline notification suppressed ({duration_minutes}min too short)")
+        else:
+            queue_offline_notification(
+                streamer_login=streamer.login,
+                streamer_display_name=streamer.display_name,
+                profile_image_url=streamer.profile_image_url or "",
+                game_name=open_stream.game_name or "",
+                duration_minutes=duration_minutes,
+                points_awarded=points_list,
+                total_points=total_points,
+            )
 
     return duration_minutes
 
@@ -127,16 +130,19 @@ def reconcile_live_states(db: Session) -> dict:
                         assign_live_role(streamer.discord_id)
 
                     # Send live notification (webhook missed this)
-                    started_at_str = started_at.isoformat() if hasattr(started_at, 'isoformat') else str(started_at)
-                    queue_live_notification(
-                        streamer_login=streamer.login,
-                        streamer_display_name=streamer.display_name,
-                        profile_image_url=streamer.profile_image_url or "",
-                        game_name=game_name,
-                        title=stream_info.get("title", "") if stream_info else "",
-                        thumbnail_url=stream_info.get("thumbnail_url", "") if stream_info else "",
-                        started_at=started_at_str,
-                    )
+                    if _is_live_cooldown_active(streamer.id, db):
+                        print(f"⏳ {streamer.display_name} live notification suppressed (cooldown)")
+                    else:
+                        started_at_str = started_at.isoformat() if hasattr(started_at, 'isoformat') else str(started_at)
+                        queue_live_notification(
+                            streamer_login=streamer.login,
+                            streamer_display_name=streamer.display_name,
+                            profile_image_url=streamer.profile_image_url or "",
+                            game_name=game_name,
+                            title=stream_info.get("title", "") if stream_info else "",
+                            thumbnail_url=stream_info.get("thumbnail_url", "") if stream_info else "",
+                            started_at=started_at_str,
+                        )
                 else:
                     if streamer.discord_id:
                         remove_live_role(streamer.discord_id)
@@ -187,9 +193,12 @@ def _get_stream_info(user_id: str) -> dict | None:
     if not data:
         return None
     started_at_str = data[0]["started_at"]
+    thumb = data[0].get("thumbnail_url", "")
+    if thumb:
+        thumb = thumb.replace("{width}", "440").replace("{height}", "248")
     return {
         "started_at": datetime.fromisoformat(started_at_str.replace("Z", "+00:00")),
         "title": data[0].get("title", ""),
         "game_name": data[0].get("game_name", ""),
-        "thumbnail_url": data[0].get("thumbnail_url", ""),
+        "thumbnail_url": thumb,
     }

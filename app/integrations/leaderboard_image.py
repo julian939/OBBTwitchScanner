@@ -105,7 +105,7 @@ def _center_y(area_y, area_h, text_h):
     return area_y + (area_h - text_h) // 2
 
 
-def render_leaderboard(entries, page=1, total_pages=1):
+def render_leaderboard(entries, page=1, total_pages=1, tip=""):
     """Render a leaderboard page as a PIL Image.
 
     entries: list of dicts with keys:
@@ -113,7 +113,12 @@ def render_leaderboard(entries, page=1, total_pages=1):
     """
     num = len(entries)
     total_rows_h = sum(_row_height(e) for e in entries)
-    img_height = PADDING + TITLE_AREA + HEADER_HEIGHT + total_rows_h + PADDING
+    img_height = PADDING + TITLE_AREA + HEADER_HEIGHT + total_rows_h
+    if tip:
+        img_height += 12 + 18  # tip footer
+        img_height += 14  # balanced bottom padding after tip
+    else:
+        img_height += PADDING
 
     img = Image.new("RGB", (IMG_WIDTH, img_height), BG_COLOR)
     draw = ImageDraw.Draw(img)
@@ -278,6 +283,16 @@ def render_leaderboard(entries, page=1, total_pages=1):
         draw.text((px, py), pts_text, font=FONT_DATA, fill=TEXT_WHITE)
 
         y += rh
+
+    # ── Tip footer ──
+    if tip:
+        y += 12
+        full_tip = f"Tip: {tip}"
+        full_w, _ = _text_size(draw, full_tip, FONT_SUBTITLE)
+        tip_x = (IMG_WIDTH - full_w) // 2
+        draw.text((tip_x, y), "Tip:", font=FONT_HEADER, fill=TEXT_HEADER)
+        tw_tip, _ = _text_size(draw, "Tip: ", FONT_HEADER)
+        draw.text((tip_x + tw_tip, y), tip, font=FONT_SUBTITLE, fill=TEXT_SECONDARY)
 
     return img
 

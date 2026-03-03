@@ -1,16 +1,43 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.database.models import Streamer, Stream, PointTransaction
 from app.services.points import award_stream_end_points
 from app.services.notification import queue_live_notification, queue_offline_notification
-from app.services.roles import assign_live_role, remove_live_role
+from app.services.roles import assign_live_role, remove_live_role, schedule_leaderboard_role_sync
 from app.integrations.twitch import twitch_api
 from app.utils.categories import is_tracked_category
+from app.config import get_settings
+
+_settings = get_settings()
+
+
+def _is_live_cooldown_active(streamer_id: str, db: Session) -> bool:
+    """Check if the streamer's last stream ended too recently for a new notification."""
+    cooldown = _settings.notify_live_cooldown_minutes
+    if cooldown <= 0:
+        return False
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown)
+    recent = (
+        db.query(Stream)
+        .filter(
+            Stream.streamer_id == streamer_id,
+            Stream.ended_at.isnot(None),
+            Stream.ended_at >= cutoff,
+        )
+        .first()
+    )
+    return recent is not None
+
+
+def _is_offline_too_short(duration_minutes: int) -> bool:
+    """Check if the stream was too short to notify."""
+    return duration_minutes < _settings.notify_offline_min_duration_minutes
 
 # Prevents race condition between webhook and reconciliation
 _stream_locks: dict[str, threading.Lock] = {}
@@ -82,15 +109,19 @@ def handle_stream_online(event: dict, db: Session) -> None:
     if streamer.discord_id:
         assign_live_role(streamer.discord_id)
 
-    queue_live_notification(
-        streamer_login=streamer_login,
-        streamer_display_name=streamer_name,
-        profile_image_url=streamer.profile_image_url or "",
-        game_name=game_name,
-        title=stream_info["title"] if stream_info else "",
-        thumbnail_url=stream_info["thumbnail_url"] if stream_info else "",
-        started_at=started_at_str,
-    )
+    # Notify (skip if crash-restart cooldown active)
+    if _is_live_cooldown_active(streamer_id, db):
+        print(f"⏳ {streamer_name} live notification suppressed (cooldown)")
+    else:
+        queue_live_notification(
+            streamer_login=streamer_login,
+            streamer_display_name=streamer_name,
+            profile_image_url=streamer.profile_image_url or "",
+            game_name=game_name,
+            title=stream_info["title"] if stream_info else "",
+            thumbnail_url=stream_info["thumbnail_url"] if stream_info else "",
+            started_at=started_at_str,
+        )
 
 
 def _get_stream_points_summary(stream_id: int, db: Session) -> list:
@@ -165,14 +196,21 @@ def handle_stream_offline(event: dict, db: Session) -> int | None:
         # Use the game_name from the stream start for channel routing
         stream_game = open_stream.game_name or "" if open_stream else ""
 
-        queue_offline_notification(
-            streamer_login=streamer.login,
-            streamer_display_name=streamer.display_name,
-            profile_image_url=streamer.profile_image_url or "",
-            game_name=stream_game,
-            duration_minutes=duration_minutes,
-            points_awarded=points_list,
-            total_points=total_points,
-        )
+        # Notify (skip if stream was too short — likely a crash)
+        if _is_offline_too_short(duration_minutes):
+            print(f"⏳ {streamer.display_name} offline notification suppressed ({duration_minutes}min < {_settings.notify_offline_min_duration_minutes}min)")
+        else:
+            queue_offline_notification(
+                streamer_login=streamer.login,
+                streamer_display_name=streamer.display_name,
+                profile_image_url=streamer.profile_image_url or "",
+                game_name=stream_game,
+                duration_minutes=duration_minutes,
+                points_awarded=points_list,
+                total_points=total_points,
+            )
+
+        # Sync leaderboard roles (points changed)
+        schedule_leaderboard_role_sync()
 
     return duration_minutes

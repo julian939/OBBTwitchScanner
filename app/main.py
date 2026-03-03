@@ -15,8 +15,8 @@ async def lifespan(app: FastAPI):
     print("✅ Database initialized")
 
     # Run migrations
-    from app.migrations.add_game_name import migrate as migrate_game_name
-    migrate_game_name()
+    #from app.migrations.add_game_name import migrate as migrate_game_name
+    #migrate_game_name()
 
     # Re-register all EventSub subscriptions with current callback URL
     from app.integrations.twitch import twitch_api
