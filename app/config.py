@@ -47,8 +47,8 @@ class Settings(BaseSettings):
     database_url: str
 
     # Notification cooldowns
-    notify_live_cooldown_minutes: int = 15
-    notify_offline_min_duration_minutes: int = 15
+    notify_offline_delay_minutes: int = 5
+    notify_offline_min_duration_minutes: int = 5
 
     class Config:
         env_file = ".env"

@@ -16,30 +16,13 @@ from app.config import get_settings
 _settings = get_settings()
 
 
-def _is_live_cooldown_active(streamer_id: str, db: Session) -> bool:
-    """Check if the streamer's last stream ended too recently for a new notification."""
-    cooldown = _settings.notify_live_cooldown_minutes
-    if cooldown <= 0:
-        return False
-
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown)
-    recent = (
-        db.query(Stream)
-        .filter(
-            Stream.streamer_id == streamer_id,
-            Stream.ended_at.isnot(None),
-            Stream.ended_at >= cutoff,
-        )
-        .first()
-    )
-    return recent is not None
-
-
 def _is_offline_too_short(duration_minutes: int) -> bool:
     """Check if the stream was too short to notify."""
     return duration_minutes < _settings.notify_offline_min_duration_minutes
 
-# Prevents race condition between webhook and reconciliation
+
+# ── Per-streamer locks (prevent race between webhook & reconciliation) ──
+
 _stream_locks: dict[str, threading.Lock] = {}
 _locks_lock = threading.Lock()
 
@@ -50,6 +33,142 @@ def _get_streamer_lock(streamer_id: str) -> threading.Lock:
             _stream_locks[streamer_id] = threading.Lock()
         return _stream_locks[streamer_id]
 
+
+# ── Delayed offline mechanism ─────────────────────────────────
+# Instead of a live-cooldown we delay the offline finalization.
+# If the streamer comes back within the delay window (crash/reconnect),
+# the timer is cancelled and the stream continues seamlessly.
+
+_pending_offlines: dict[str, threading.Timer] = {}
+_pending_lock = threading.Lock()
+
+
+def _cancel_pending_offline(streamer_id: str) -> bool:
+    """Cancel a pending offline timer. Returns True if one was cancelled."""
+    with _pending_lock:
+        timer = _pending_offlines.pop(streamer_id, None)
+    if timer:
+        timer.cancel()
+        print(f"⏳ Cancelled pending offline for {streamer_id} (reconnect)")
+        return True
+    return False
+
+
+def has_pending_offline(streamer_id: str) -> bool:
+    """Check if a streamer has a pending offline timer (grace period active)."""
+    with _pending_lock:
+        return streamer_id in _pending_offlines
+
+
+def _schedule_offline(streamer_id: str, delay_seconds: float, offline_at: datetime) -> None:
+    """Schedule delayed offline finalization with the real offline timestamp."""
+    with _pending_lock:
+        # Cancel any existing timer first
+        old = _pending_offlines.pop(streamer_id, None)
+        if old:
+            old.cancel()
+
+        timer = threading.Timer(delay_seconds, _finalize_offline, args=[streamer_id, offline_at])
+        timer.daemon = True
+        _pending_offlines[streamer_id] = timer
+        timer.start()
+
+
+def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
+    """
+    Called after the delay. If the streamer is still offline,
+    close the stream using the real offline timestamp for accurate duration/points.
+    """
+    from app.database.database import SessionLocal
+
+    # Remove from pending map
+    with _pending_lock:
+        _pending_offlines.pop(streamer_id, None)
+
+    lock = _get_streamer_lock(streamer_id)
+    with lock:
+        db = SessionLocal()
+        try:
+            streamer = db.query(Streamer).filter(Streamer.id == streamer_id).first()
+            if not streamer:
+                return
+
+            # If streamer came back online in the meantime → abort
+            if streamer.is_live:
+                print(f"⏳ {streamer.display_name} is live again, skipping offline finalization")
+                return
+
+            open_stream = (
+                db.query(Stream)
+                .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
+                .order_by(Stream.started_at.desc())
+                .first()
+            )
+            if not open_stream:
+                print(f"⚠️ No open stream for {streamer.display_name} during finalization (already closed by reconciliation?)")
+                return
+
+            # Guard: if ended_at is already set, reconciliation beat us
+            if open_stream.ended_at is not None:
+                print(f"⚠️ Stream for {streamer.display_name} already closed, skipping finalization")
+                return
+
+            started = open_stream.started_at.replace(tzinfo=timezone.utc)
+            duration_minutes = int((offline_at - started).total_seconds() / 60)
+
+            open_stream.ended_at = offline_at
+            open_stream.duration_minutes = duration_minutes
+
+            # Event multiplier
+            try:
+                from app.integrations.discord_bot import bot
+                from app.services.points import EVENT_MULTIPLIER
+                multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
+            except Exception:
+                multiplier = 1
+
+            award_stream_end_points(streamer_id, open_stream, db, multiplier=multiplier)
+
+            points_list = _get_stream_points_summary(open_stream.id, db)
+            db.commit()
+
+            total_points = (
+                db.query(func.sum(PointTransaction.points))
+                .filter(PointTransaction.streamer_id == streamer_id)
+                .scalar() or 0
+            )
+
+            stream_game = open_stream.game_name or ""
+
+            print(f"🔴 {streamer.display_name} offline finalized after {duration_minutes} min")
+
+            if _is_offline_too_short(duration_minutes):
+                print(
+                    f"⏳ {streamer.display_name} offline notification suppressed "
+                    f"({duration_minutes}min < {_settings.notify_offline_min_duration_minutes}min)"
+                )
+            else:
+                queue_offline_notification(
+                    streamer_login=streamer.login,
+                    streamer_display_name=streamer.display_name,
+                    profile_image_url=streamer.profile_image_url or "",
+                    game_name=stream_game,
+                    duration_minutes=duration_minutes,
+                    points_awarded=points_list,
+                    total_points=total_points,
+                )
+
+            schedule_leaderboard_role_sync()
+
+        except Exception as e:
+            print(f"❌ Offline finalization error for {streamer_id}: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            db.close()
+
+
+# ── Stream Online ─────────────────────────────────────────────
 
 def handle_stream_online(event: dict, db: Session) -> None:
     streamer_id = event["broadcaster_user_id"]
@@ -71,6 +190,9 @@ def handle_stream_online(event: dict, db: Session) -> None:
     streamer.display_name = streamer_name
     db.commit()
 
+    # Cancel any pending offline → streamer reconnected
+    was_pending = _cancel_pending_offline(streamer_id)
+
     # Fetch stream info with retry
     import time
     stream_info = None
@@ -82,12 +204,10 @@ def handle_stream_online(event: dict, db: Session) -> None:
 
     game_name = stream_info["game_name"] if stream_info else ""
 
-    # Only open stream + notify if tracked category
     if not is_tracked_category(game_name):
         print(f"⏭️ {streamer_name} went live in '{game_name}' (untracked)")
         return
 
-    # Lock per streamer to prevent race with reconciliation
     lock = _get_streamer_lock(streamer_id)
     with lock:
         existing = (
@@ -95,9 +215,15 @@ def handle_stream_online(event: dict, db: Session) -> None:
             .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
             .first()
         )
+
         if existing:
-            print(f"ℹ️ {streamer_name} stream already tracked (reconciliation caught it)")
-            return
+            if existing.game_name == game_name:
+                # Same category → stream continues (reconnect case)
+                print(f"ℹ️ {streamer_name} reconnected, stream continues ({game_name})")
+                return
+            else:
+                # Different category → close old stream, open new one
+                _close_stream_for_category_change(streamer, existing, game_name, db)
 
         stream = Stream(streamer_id=streamer_id, started_at=started_at, game_name=game_name)
         db.add(stream)
@@ -109,20 +235,178 @@ def handle_stream_online(event: dict, db: Session) -> None:
     if streamer.discord_id:
         assign_live_role(streamer.discord_id)
 
-    # Notify (skip if crash-restart cooldown active)
-    if _is_live_cooldown_active(streamer_id, db):
-        print(f"⏳ {streamer_name} live notification suppressed (cooldown)")
-    else:
-        queue_live_notification(
-            streamer_login=streamer_login,
-            streamer_display_name=streamer_name,
+    # Send live notification (no cooldown needed — delayed offline handles reconnects)
+    queue_live_notification(
+        streamer_login=streamer_login,
+        streamer_display_name=streamer_name,
+        profile_image_url=streamer.profile_image_url or "",
+        game_name=game_name,
+        title=stream_info["title"] if stream_info else "",
+        thumbnail_url=stream_info["thumbnail_url"] if stream_info else "",
+        started_at=started_at_str,
+    )
+
+
+# ── Stream Offline ────────────────────────────────────────────
+
+def handle_stream_offline(event: dict, db: Session) -> None:
+    """
+    Mark streamer as offline and schedule delayed finalization.
+    The actual stream closing + notification happens after the delay,
+    giving the streamer time to reconnect (crash/disconnect).
+    """
+    streamer_id = event["broadcaster_user_id"]
+
+    streamer = db.query(Streamer).filter(Streamer.id == streamer_id).first()
+    if not streamer:
+        return
+
+    streamer.is_live = False
+    db.commit()
+
+    # Remove live role immediately (visual feedback)
+    if streamer.discord_id:
+        remove_live_role(streamer.discord_id)
+
+    # Check if there's even an open stream to finalize
+    open_stream = (
+        db.query(Stream)
+        .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
+        .first()
+    )
+    if not open_stream:
+        print(f"⚠️ No open stream for {streamer.display_name}, just marking offline")
+        return
+
+    delay = _settings.notify_offline_delay_minutes * 60
+    offline_at = datetime.now(timezone.utc)
+    _schedule_offline(streamer_id, delay, offline_at)
+    print(f"⏳ {streamer.display_name} went offline — finalizing in {_settings.notify_offline_delay_minutes}min")
+
+
+# ── Category Change ───────────────────────────────────────────
+
+def _close_stream_for_category_change(
+    streamer: Streamer,
+    open_stream: Stream,
+    new_game: str,
+    db: Session,
+) -> None:
+    """
+    Close the current stream because the category changed.
+    Awards points and sends offline notification for the old category.
+    """
+    now = datetime.now(timezone.utc)
+    started = open_stream.started_at.replace(tzinfo=timezone.utc)
+    duration_minutes = int((now - started).total_seconds() / 60)
+
+    open_stream.ended_at = now
+    open_stream.duration_minutes = duration_minutes
+    old_game = open_stream.game_name or ""
+
+    # Event multiplier
+    try:
+        from app.integrations.discord_bot import bot
+        from app.services.points import EVENT_MULTIPLIER
+        multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
+    except Exception:
+        multiplier = 1
+
+    award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
+
+    points_list = _get_stream_points_summary(open_stream.id, db)
+    db.commit()
+
+    total_points = (
+        db.query(func.sum(PointTransaction.points))
+        .filter(PointTransaction.streamer_id == streamer.id)
+        .scalar() or 0
+    )
+
+    print(f"🔄 {streamer.display_name} switched '{old_game}' → '{new_game}' after {duration_minutes}min")
+
+    if not _is_offline_too_short(duration_minutes):
+        queue_offline_notification(
+            streamer_login=streamer.login,
+            streamer_display_name=streamer.display_name,
             profile_image_url=streamer.profile_image_url or "",
-            game_name=game_name,
-            title=stream_info["title"] if stream_info else "",
-            thumbnail_url=stream_info["thumbnail_url"] if stream_info else "",
-            started_at=started_at_str,
+            game_name=old_game,
+            duration_minutes=duration_minutes,
+            points_awarded=points_list,
+            total_points=total_points,
         )
 
+    schedule_leaderboard_role_sync()
+
+
+def handle_category_change(streamer_id: str, new_game: str, db: Session) -> None:
+    """
+    Called by reconciliation when a live streamer's category changed.
+    Closes the old stream and opens a new one if the new category is tracked.
+    """
+    lock = _get_streamer_lock(streamer_id)
+    with lock:
+        streamer = db.query(Streamer).filter(Streamer.id == streamer_id).first()
+        if not streamer:
+            return
+
+        open_stream = (
+            db.query(Stream)
+            .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
+            .first()
+        )
+
+        # If no open stream but new category is tracked → open fresh
+        if not open_stream:
+            if is_tracked_category(new_game):
+                now = datetime.now(timezone.utc)
+                stream = Stream(streamer_id=streamer_id, started_at=now, game_name=new_game)
+                db.add(stream)
+                db.commit()
+                print(f"🟢 {streamer.display_name} switched to tracked '{new_game}', stream opened")
+
+                stream_info = twitch_api.get_stream_info(streamer_id)
+                queue_live_notification(
+                    streamer_login=streamer.login,
+                    streamer_display_name=streamer.display_name,
+                    profile_image_url=streamer.profile_image_url or "",
+                    game_name=new_game,
+                    title=stream_info["title"] if stream_info else "",
+                    thumbnail_url=stream_info["thumbnail_url"] if stream_info else "",
+                    started_at=now.isoformat(),
+                )
+            return
+
+        # Same category → nothing to do
+        if open_stream.game_name == new_game:
+            return
+
+        # Different category → close old stream
+        _close_stream_for_category_change(streamer, open_stream, new_game, db)
+
+        # If new category is tracked → open new stream + notify
+        if is_tracked_category(new_game):
+            now = datetime.now(timezone.utc)
+            stream = Stream(streamer_id=streamer_id, started_at=now, game_name=new_game)
+            db.add(stream)
+            db.commit()
+            print(f"🟢 {streamer.display_name} new stream opened for '{new_game}'")
+
+            stream_info = twitch_api.get_stream_info(streamer_id)
+            queue_live_notification(
+                streamer_login=streamer.login,
+                streamer_display_name=streamer.display_name,
+                profile_image_url=streamer.profile_image_url or "",
+                game_name=new_game,
+                title=stream_info["title"] if stream_info else "",
+                thumbnail_url=stream_info["thumbnail_url"] if stream_info else "",
+                started_at=now.isoformat(),
+            )
+        else:
+            print(f"⏭️ {streamer.display_name} switched to untracked '{new_game}', stream closed")
+
+
+# ── Helpers ───────────────────────────────────────────────────
 
 def _get_stream_points_summary(stream_id: int, db: Session) -> list:
     """Aggregate ALL points for a stream (including periodic live points)."""
@@ -136,81 +420,3 @@ def _get_stream_points_summary(stream_id: int, db: Session) -> list:
         .all()
     )
     return [(row.reason, row.total) for row in rows]
-
-
-def handle_stream_offline(event: dict, db: Session) -> int | None:
-    streamer_id = event["broadcaster_user_id"]
-    now = datetime.now(timezone.utc)
-
-    streamer = db.query(Streamer).filter(Streamer.id == streamer_id).first()
-    if not streamer:
-        return None
-
-    streamer.is_live = False
-
-    # Remove live role
-    if streamer.discord_id:
-        remove_live_role(streamer.discord_id)
-
-    open_stream = (
-        db.query(Stream)
-        .filter(Stream.streamer_id == streamer_id, Stream.ended_at.is_(None))
-        .order_by(Stream.started_at.desc())
-        .first()
-    )
-
-    duration_minutes = None
-    points_list = []
-
-    if open_stream:
-        open_stream.ended_at = now
-        started = open_stream.started_at.replace(tzinfo=timezone.utc)
-        duration_minutes = int((now - started).total_seconds() / 60)
-        open_stream.duration_minutes = duration_minutes
-
-        try:
-            from app.integrations.discord_bot import bot
-            from app.services.points import EVENT_MULTIPLIER
-            multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
-        except Exception:
-            multiplier = 1
-
-        award_stream_end_points(streamer_id, open_stream, db, multiplier=multiplier)
-
-        # Get ALL points for this stream (periodic + end-of-stream)
-        points_list = _get_stream_points_summary(open_stream.id, db)
-
-        print(f"🔴 {streamer.display_name} went offline after {duration_minutes} min")
-    else:
-        print(f"⚠️ No open stream for {streamer.display_name}, just marking offline")
-
-    db.commit()
-
-    total_points = (
-        db.query(func.sum(PointTransaction.points))
-        .filter(PointTransaction.streamer_id == streamer_id)
-        .scalar() or 0
-    )
-
-    if duration_minutes:
-        # Use the game_name from the stream start for channel routing
-        stream_game = open_stream.game_name or "" if open_stream else ""
-
-        # Notify (skip if stream was too short — likely a crash)
-        if _is_offline_too_short(duration_minutes):
-            print(f"⏳ {streamer.display_name} offline notification suppressed ({duration_minutes}min < {_settings.notify_offline_min_duration_minutes}min)")
-        else:
-            queue_offline_notification(
-                streamer_login=streamer.login,
-                streamer_display_name=streamer.display_name,
-                profile_image_url=streamer.profile_image_url or "",
-                game_name=stream_game,
-                duration_minutes=duration_minutes,
-                points_awarded=points_list,
-                total_points=total_points,
-            )
-
-        # Sync leaderboard roles (points changed)
-        schedule_leaderboard_role_sync()
-
-    return duration_minutes

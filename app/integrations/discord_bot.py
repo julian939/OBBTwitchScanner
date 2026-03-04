@@ -1008,7 +1008,7 @@ class StreamTrackerBot(discord.Client):
             embed.set_thumbnail(url=streamer.profile_image_url)
 
         embed.set_footer(text=f"⏱ {uptime}  ·  twitch.tv/{streamer.login}")
-        embed.timestamp = now
+        #embed.timestamp = now
         return embed
 
     # ── Leaderboard Builder ────────────────────────────────────
@@ -1130,7 +1130,7 @@ class StreamTrackerBot(discord.Client):
                         color=ACCENT,
                     )
                     embed.set_footer(text=random_tip())
-                    embed.timestamp = datetime.now(timezone.utc)
+                    #embed.timestamp = datetime.now(timezone.utc)
                     await interaction.followup.send(embed=embed)
                     return
 
@@ -1202,7 +1202,7 @@ class StreamTrackerBot(discord.Client):
                     embed = discord.Embed(title="OBB Streamer Leaderboard", color=ACCENT)
                     embed.description = "```\n  No data yet.\n```"
                     embed.set_footer(text=random_tip())
-                    embed.timestamp = now
+                    #embed.timestamp = now
                     await interaction.followup.send(embed=embed)
                 elif len(image_bytes) == 1:
                     import io
@@ -1330,7 +1330,7 @@ class StreamTrackerBot(discord.Client):
                     embed.add_field(name="Points Breakdown", value=bd, inline=False)
 
                 embed.set_footer(text=random_tip())
-                embed.timestamp = now
+                #embed.timestamp = now
                 await interaction.followup.send(embed=embed)
             finally:
                 db.close()
