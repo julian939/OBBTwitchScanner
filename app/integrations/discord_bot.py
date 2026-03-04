@@ -35,26 +35,26 @@ def fmt_dur(minutes):
     return f"{h}h {m}m" if m else f"{h}h"
 
 
-def wrap_title(text, wrap_at=35):
-    """Wrap title at nearest space after wrap_at chars, truncate to 2 lines."""
-    if not text or len(text) <= wrap_at:
+def cut_title(text, max_len=35):
+    """Cut title at nearest space from max_len."""
+    if not text or len(text) <= max_len:
         return text
-    # find nearest space to wrap_at
-    space_before = text.rfind(" ", 0, wrap_at + 1)
-    space_after = text.find(" ", wrap_at)
-    if space_after == -1 and space_before <= 0:
-        return text[:wrap_at] + "..."
-    if space_before <= 0:
-        pos = space_after
+
+    # Find nearest space before and after max_len
+    space_before = text.rfind(" ", 0, max_len)
+    space_after = text.find(" ", max_len)
+
+    if space_before == -1 and space_after == -1:
+        return text[:max_len] + "..."
+
+    if space_before == -1:
+        cut = space_after
     elif space_after == -1:
-        pos = space_before
+        cut = space_before
     else:
-        pos = space_before if (wrap_at - space_before) <= (space_after - wrap_at) else space_after
-    max_len = 2 * pos  # newline doesn't count
-    if len(text) > max_len:
-        truncated = text[:max_len].rsplit(" ", 1)[0].rstrip()
-        text = truncated + "..."
-    return text[:pos] + "\n" + text[pos + 1:]
+        cut = space_before if (max_len - space_before) <= (space_after - max_len) else space_after
+
+    return text[:cut].rstrip() + "..."
 
 
 def bar(value, maximum, length=20):
@@ -132,7 +132,44 @@ def get_game_channel(bot_instance, game_name: str):
     return bot_instance.get_channel(channel_id)
 
 
+async def _square_thumbnail(url: str, top_padding: int = 20) -> discord.File | None:
+    """Download thumbnail and add top padding to align with author text."""
+    import aiohttp
+    from PIL import Image
+    import io
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.read()
+
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        w, h = img.size
+        new_h = h + top_padding
+        padded = Image.new("RGBA", (w, new_h), (0, 0, 0, 0))
+        padded.paste(img, (0, top_padding))
+
+        buf = io.BytesIO()
+        padded.save(buf, format="PNG")
+        buf.seek(0)
+        return discord.File(buf, filename="thumb.png")
+    except Exception:
+        return None
+
+
 # ── Pagination View ───────────────────────────────────────────
+
+class LiveLinkView(ui.View):
+    def __init__(self, twitch_url: str):
+        super().__init__(timeout=None)
+        self.add_item(ui.Button(
+            style=discord.ButtonStyle.link,
+            label="  Watch",
+            url=twitch_url,
+            emoji=discord.PartialEmoji(name="Twitch", id=1478792581742723183)
+        ))
 
 class PaginatorView(ui.View):
     def __init__(self, pages, current=0):
@@ -754,56 +791,82 @@ class StreamTrackerBot(discord.Client):
     async def on_ready(self):
         print(f"🤖 Discord bot connected as {self.user}")
         """
-        # ── TEST: send sample live + offline notification ──
-        await asyncio.sleep(2)  # wait for channels to be cached
-        from app.services.notification import LiveNotification, OfflineNotification
-        from app.integrations.twitch import twitch_api
-
-        # Fetch real avatar + preview from Twitch
-        _test_login = "therealknossi24"
-        _test_name = "TheRealKnossi24"
-        _test_avatar = ""
         try:
-            user_info = twitch_api.get_user(_test_login)
-            if user_info:
-                _test_avatar = user_info.get("profile_image_url", "")
-                _test_name = user_info.get("display_name", _test_name)
-        except Exception:
-            pass
-        _test_thumb = f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{_test_login}-320x180.jpg"
+            # ── TEST: send sample live + offline notification ──
+            await asyncio.sleep(2)  # wait for channels to be cached
+            from app.services.notification import LiveNotification, OfflineNotification
+            from app.integrations.twitch import twitch_api
 
-        test_live = LiveNotification(
-            streamer_login=_test_login,
-            streamer_display_name=_test_name,
-            profile_image_url=_test_avatar,
-            game_name="Oh Baby! Kart",
-            title="Testing the new notification",
-            thumbnail_url=_test_thumb,
-            started_at="",
-            twitch_url=f"https://twitch.tv/{_test_login}",
-        )
+            # Fetch real avatar + preview from Twitch
+            _test_login = "therealknossi24"
+            _test_name = "TheRealKnossi24"
+            _test_avatar = ""
+            try:
+                user_info = twitch_api.get_user(_test_login)
+                if user_info:
+                    _test_avatar = user_info.get("profile_image_url", "")
+                    _test_name = user_info.get("display_name", _test_name)
+            except Exception as e:
+                print(f"⚠️ Twitch API error: {e}")
 
-        test_offline = OfflineNotification(
-            streamer_login=_test_login,
-            streamer_display_name=_test_name,
-            profile_image_url=_test_avatar,
-            game_name="Oh Baby! Kart",
-            duration_minutes=147,
-            points_awarded=[("stream_time", 147), ("daily_bonus", 1), ("streak_bonus", 1)],
-            total_points=24844,
-            twitch_url=f"https://twitch.tv/{_test_login}",
-        )
+            _test_thumb = f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{_test_login}-320x180.jpg"
 
-        channel = get_game_channel(self, "Oh Baby! Kart")
-        if channel:
-            mention = f"<@{self.user.id}>"
-            await channel.send(embed=self._build_live_embed(test_live))
-            await channel.send(mention)
-            await channel.send(embed=self._build_offline_embed(test_offline))
-            print("🧪 Test notifications sent")
-        else:
-            print("⚠️ No channel for test notifications")
-        # ── END TEST ──
+            test_live = LiveNotification(
+                streamer_login=_test_login,
+                streamer_display_name=_test_name,
+                profile_image_url=_test_avatar,
+                game_name="Oh Baby! Kart",
+                title="Testing the new notification. tu tu tu tu tu tuuuuuuuu",
+                thumbnail_url=_test_thumb,
+                started_at="",
+                twitch_url=f"https://twitch.tv/{_test_login}",
+            )
+
+            test_offline = OfflineNotification(
+                streamer_login=_test_login,
+                streamer_display_name=_test_name,
+                profile_image_url=_test_avatar,
+                game_name="Oh Baby! Kart",
+                duration_minutes=1470,
+                points_awarded=[("streak_bonus", 1), ("daily_bonus", 1), ("stream_time", 1470)],
+                total_points=24844,
+                twitch_url=f"https://twitch.tv/{_test_login}",
+            )
+
+            print(f"🔍 Looking for channel for 'Oh Baby! Kart'...")
+            print(f"🔍 discord_game_channels = {settings.discord_game_channels}")
+            channel = get_game_channel(self, "Oh Baby! Kart")
+            print(f"🔍 Channel result: {channel}")
+
+            if channel:
+                # Look up discord_id for test
+                _test_discord_id = None
+                try:
+                    db = SessionLocal()
+                    streamer = db.query(Streamer).filter(Streamer.login == _test_login).first()
+                    if streamer and streamer.discord_id:
+                        _test_discord_id = streamer.discord_id
+                    db.close()
+                except Exception:
+                    pass
+
+                embed, thumb_file = await self._build_live_embed(test_live, discord_id=1365043190796779661)
+                kwargs = {"embed": embed, "view": LiveLinkView(test_live.twitch_url)}
+                if thumb_file:
+                    kwargs["file"] = thumb_file
+                await channel.send(**kwargs)
+
+                await channel.send(embed=self._build_offline_embed(test_offline))
+                print("🧪 Test notifications sent")
+            else:
+                print("⚠️ No channel for test notifications")
+            # ── END TEST ──
+            
+
+        except Exception as e:
+            print(f"❌ on_ready error: {e}")
+            import traceback
+            traceback.print_exc()
         """
 
     def has_active_event(self) -> bool:
@@ -829,34 +892,39 @@ class StreamTrackerBot(discord.Client):
                     continue
 
                 if isinstance(n, LiveNotification):
-                    # Look up discord_id for mention
-                    mention = ""
+                    # Look up discord_id for tag in embed
+                    discord_id = None
                     try:
-                        from app.database.database import SessionLocal
-                        from app.database.models import Streamer
                         db = SessionLocal()
                         streamer = db.query(Streamer).filter(Streamer.login == n.streamer_login).first()
                         if streamer and streamer.discord_id:
-                            mention = f"<@{streamer.discord_id}>"
+                            discord_id = streamer.discord_id
                         db.close()
                     except Exception:
                         pass
-                    await channel.send(embed=self._build_live_embed(n))
-                    if mention:
-                        await channel.send(mention)
+                    embed, thumb_file = await self._build_live_embed(n, discord_id=discord_id)
+                    kwargs = {"embed": embed, "view": LiveLinkView(n.twitch_url)}
+                    if thumb_file:
+                        kwargs["file"] = thumb_file
+                    await channel.send(**kwargs)
                 elif isinstance(n, OfflineNotification):
                     await channel.send(embed=self._build_offline_embed(n))
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"❌ Notification error: {e}")
+                import traceback
+                traceback.print_exc()
 
     # ── Notification Embeds ────────────────────────────────────
 
-    def _build_live_embed(self, n):
-        author = f"{n.streamer_display_name} is live"
-        if n.game_name:
-            author += f"  ·  {n.game_name}"
+    async def _build_live_embed(self, n, discord_id=None):
+        author = n.streamer_display_name
+        if discord_id:
+            member = self.get_user(int(discord_id))
+            if member:
+                author += f" ({member.display_name})"
+        author += " is live"
 
         embed = discord.Embed(color=ACCENT)
         embed.set_author(
@@ -866,37 +934,43 @@ class StreamTrackerBot(discord.Client):
         )
         desc = ""
         if n.title:
-            desc += f"```{wrap_title(n.title)}```\n"
-        desc += f"[Watch on Twitch  →]({n.twitch_url})"
+            desc += f"**{cut_title(n.title)}**"
         embed.description = desc
+
+        thumb_file = None
         if n.thumbnail_url:
-            embed.set_thumbnail(url=n.thumbnail_url)
-        return embed
+            thumb_file = await _square_thumbnail(n.thumbnail_url)
+            if thumb_file:
+                embed.set_thumbnail(url="attachment://thumb.png")
+            else:
+                embed.set_thumbnail(url=n.thumbnail_url)
+
+        return embed, thumb_file
 
     def _build_offline_embed(self, n):
         h, m = divmod(n.duration_minutes, 60)
         dur = f"{h}h {m}m" if h else f"{m}m"
 
         pts_parts = []
+        bonus_parts = []
         for reason, pts in n.points_awarded:
-            label = reason.replace("_", " ").title()
-            if reason == "daily_bonus" or reason == "streak_bonus":
-                pts_parts.append(f"**{label}**")
+            label = reason.split("_")[0].title()
+            if reason in ("daily_bonus", "streak_bonus"):
+                bonus_parts.append(f"{label}")
             else:
-                pts_parts.append(f"**+{pts:,}** {label}")
-        pts_line = "  ·  ".join(pts_parts) if pts_parts else ""
+                pts_parts.append(f"+{pts:,} {label}")
+        all_parts = pts_parts + bonus_parts
+        pts_line = "  ·  ".join(all_parts) if all_parts else ""
 
         embed = discord.Embed(color=OFFLINE_GRAY)
         embed.set_author(
-            name=f"{n.streamer_display_name} went offline", #  ·  {dur}",
+            name=f"{n.streamer_display_name} went offline",
             icon_url=n.profile_image_url if n.profile_image_url else None,
         )
         desc = ""
         if pts_line:
             desc += f"{pts_line}\n"
-        #desc += f"Total Points: **{n.total_points:,}**"
-        desc += f"Duration: **{dur}**"
-        embed.description = desc
+        embed.set_footer(text=f"Duration: {dur}  ·  " + desc)
         return embed
 
     # ── Build Live Page Embed ──────────────────────────────────
@@ -945,7 +1019,6 @@ class StreamTrackerBot(discord.Client):
         import io
 
         if not entries:
-            # Return empty state as embed fallback
             return None
 
         total_pages = (len(entries) + LEADERBOARD_PAGE_SIZE - 1) // LEADERBOARD_PAGE_SIZE
