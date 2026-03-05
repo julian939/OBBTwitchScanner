@@ -388,11 +388,12 @@ class RegistrationReviewView(ui.View):
 
     @ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
     async def approve(self, interaction: discord.Interaction, button):
+        await interaction.response.defer()
         db = SessionLocal()
         try:
             req = db.query(RegistrationRequest).filter(RegistrationRequest.id == self.request_id).first()
             if not req or req.status != RegistrationStatus.PENDING:
-                await interaction.response.send_message("```diff\n- Request no longer pending\n```", ephemeral=True)
+                await interaction.followup.send("```diff\n- Request no longer pending\n```", ephemeral=True)
                 return
 
             from app.services.subscription import add_streamer
@@ -415,7 +416,7 @@ class RegistrationReviewView(ui.View):
                 f"Twitch: `{self.twitch_username}`\n\n"
                 f"```diff\n+ Approved by {interaction.user.display_name}\n```"
             )
-            await interaction.response.edit_message(embed=result_embed, view=self)
+            await interaction.edit_original_response(embed=result_embed, view=self)
 
             await _send_registration_dm(
                 interaction.guild, self.discord_id,
@@ -423,20 +424,18 @@ class RegistrationReviewView(ui.View):
             )
 
         except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"```diff\n- Error: {e}\n```", ephemeral=True)
-            else:
-                await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
+            await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
         finally:
             db.close()
 
     @ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌")
     async def reject(self, interaction: discord.Interaction, button):
+        await interaction.response.defer()
         db = SessionLocal()
         try:
             req = db.query(RegistrationRequest).filter(RegistrationRequest.id == self.request_id).first()
             if not req or req.status != RegistrationStatus.PENDING:
-                await interaction.response.send_message("```diff\n- Request no longer pending\n```", ephemeral=True)
+                await interaction.followup.send("```diff\n- Request no longer pending\n```", ephemeral=True)
                 return
 
             req.status = RegistrationStatus.REJECTED
@@ -454,7 +453,7 @@ class RegistrationReviewView(ui.View):
                 f"Twitch: `{self.twitch_username}`\n\n"
                 f"```diff\n- Rejected by {interaction.user.display_name}\n```"
             )
-            await interaction.response.edit_message(embed=result_embed, view=self)
+            await interaction.edit_original_response(embed=result_embed, view=self)
 
             await _send_registration_dm(
                 interaction.guild, self.discord_id,
@@ -462,10 +461,7 @@ class RegistrationReviewView(ui.View):
             )
 
         except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"```diff\n- Error: {e}\n```", ephemeral=True)
-            else:
-                await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
+            await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
         finally:
             db.close()
 
@@ -1106,8 +1102,10 @@ class StreamTrackerBot(discord.Client):
         # ── /live ──
 
         @self.tree.command(name="live", description="Who is currently streaming")
-        async def cmd_live(interaction):
-            await interaction.response.defer()
+        @app_commands.describe(public="Show the response to everyone")
+        async def cmd_live(interaction, public: bool = False):
+            ephemeral = not public
+            await interaction.response.defer(ephemeral=ephemeral)
             db = SessionLocal()
             try:
                 from app.utils.categories import is_tracked_category
@@ -1130,26 +1128,27 @@ class StreamTrackerBot(discord.Client):
                         color=ACCENT,
                     )
                     embed.set_footer(text=random_tip())
-                    #embed.timestamp = datetime.now(timezone.utc)
-                    await interaction.followup.send(embed=embed)
+                    await interaction.followup.send(embed=embed, ephemeral=ephemeral)
                     return
 
                 if len(tracked_live) == 1:
                     s, info = tracked_live[0]
                     open_stream = db.query(Stream).filter(Stream.streamer_id == s.id, Stream.ended_at.is_(None)).first()
-                    pts = db.query(func.sum(PointTransaction.points)).filter(PointTransaction.streamer_id == s.id).scalar() or 0
+                    pts = db.query(func.sum(PointTransaction.points)).filter(
+                        PointTransaction.streamer_id == s.id).scalar() or 0
                     embed = self._build_live_page(s, open_stream, pts, db, stream_info=info)
-                    await interaction.followup.send(embed=embed)
+                    await interaction.followup.send(embed=embed, ephemeral=ephemeral)
                     return
 
                 pages = []
                 for s, info in tracked_live:
                     open_stream = db.query(Stream).filter(Stream.streamer_id == s.id, Stream.ended_at.is_(None)).first()
-                    pts = db.query(func.sum(PointTransaction.points)).filter(PointTransaction.streamer_id == s.id).scalar() or 0
+                    pts = db.query(func.sum(PointTransaction.points)).filter(
+                        PointTransaction.streamer_id == s.id).scalar() or 0
                     pages.append(self._build_live_page(s, open_stream, pts, db, stream_info=info))
 
                 view = PaginatorView(pages)
-                msg = await interaction.followup.send(embed=pages[0], view=view)
+                msg = await interaction.followup.send(embed=pages[0], view=view, ephemeral=ephemeral)
                 view.message = msg
             finally:
                 db.close()
@@ -1157,8 +1156,10 @@ class StreamTrackerBot(discord.Client):
         # ── /leaderboard ──
 
         @self.tree.command(name="leaderboard", description="Points leaderboard")
-        async def cmd_leaderboard(interaction):
-            await interaction.response.defer()
+        @app_commands.describe(public="Show the response to everyone")
+        async def cmd_leaderboard(interaction, public: bool = False):
+            ephemeral = not public
+            await interaction.response.defer(ephemeral=ephemeral)
             db = SessionLocal()
             try:
                 from app.utils.categories import is_streamer_tracked_live
@@ -1202,19 +1203,18 @@ class StreamTrackerBot(discord.Client):
                     embed = discord.Embed(title="OBB Streamer Leaderboard", color=ACCENT)
                     embed.description = "```\n  No data yet.\n```"
                     embed.set_footer(text=random_tip())
-                    #embed.timestamp = now
-                    await interaction.followup.send(embed=embed)
+                    await interaction.followup.send(embed=embed, ephemeral=ephemeral)
                 elif len(image_bytes) == 1:
                     import io
                     buf = io.BytesIO(image_bytes[0])
                     file = discord.File(buf, filename="leaderboard.png")
-                    await interaction.followup.send(file=file)
+                    await interaction.followup.send(file=file, ephemeral=ephemeral)
                 else:
                     view = ImagePaginatorView(image_bytes)
                     import io
                     buf = io.BytesIO(image_bytes[0])
                     file = discord.File(buf, filename="leaderboard.png")
-                    msg = await interaction.followup.send(file=file, view=view)
+                    msg = await interaction.followup.send(file=file, view=view, ephemeral=ephemeral)
                     view.message = msg
             finally:
                 db.close()
@@ -1222,9 +1222,10 @@ class StreamTrackerBot(discord.Client):
         # ── /streamer ──
 
         @self.tree.command(name="streamer", description="Stats for a specific streamer")
-        @app_commands.describe(name="Twitch username")
-        async def cmd_streamer(interaction, name: str):
-            await interaction.response.defer()
+        @app_commands.describe(name="Twitch username", public="Show the response to everyone")
+        async def cmd_streamer(interaction, name: str, public: bool = False):
+            ephemeral = not public
+            await interaction.response.defer(ephemeral=ephemeral)
             db = SessionLocal()
             try:
                 now = datetime.now(timezone.utc)
@@ -1244,7 +1245,8 @@ class StreamTrackerBot(discord.Client):
                 longest_live = get_live_minutes(open_stream, now) if open_stream else 0
                 longest_min = max(longest_completed, longest_live)
 
-                total_pts = db.query(func.sum(PointTransaction.points)).filter(PointTransaction.streamer_id == s.id).scalar() or 0
+                total_pts = db.query(func.sum(PointTransaction.points)).filter(
+                    PointTransaction.streamer_id == s.id).scalar() or 0
 
                 breakdown = (
                     db.query(PointTransaction.reason, func.sum(PointTransaction.points).label("pts"))
@@ -1308,7 +1310,7 @@ class StreamTrackerBot(discord.Client):
                 overview = "```\n"
                 overview += f"  Points       {total_pts:>10,}\n"
                 overview += f"  Streams      {total_count:>10}\n"
-                overview += f"  Total Time   {round(total_min/60,1):>9}h\n"
+                overview += f"  Total Time   {round(total_min / 60, 1):>9}h\n"
                 overview += f"  Avg Stream   {avg:>9}h\n"
                 overview += f"  Longest      {longest_str:>10}\n"
                 overview += f"  Streak       {streak_str:>10}\n"
@@ -1317,7 +1319,7 @@ class StreamTrackerBot(discord.Client):
 
                 embed.add_field(
                     name="Last 7 Days",
-                    value=f"`{len(recent)}` streams  ·  `{round(recent_min/60,1)}h`",
+                    value=f"`{len(recent)}` streams  ·  `{round(recent_min / 60, 1)}h`",
                     inline=False,
                 )
 
@@ -1330,16 +1332,17 @@ class StreamTrackerBot(discord.Client):
                     embed.add_field(name="Points Breakdown", value=bd, inline=False)
 
                 embed.set_footer(text=random_tip())
-                #embed.timestamp = now
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, ephemeral=ephemeral)
             finally:
                 db.close()
 
         # ── /stats ──
 
         @self.tree.command(name="stats", description="Global tracking statistics")
-        async def cmd_stats(interaction):
-            await interaction.response.defer()
+        @app_commands.describe(public="Show the response to everyone")
+        async def cmd_stats(interaction, public: bool = False):
+            ephemeral = not public
+            await interaction.response.defer(ephemeral=ephemeral)
             db = SessionLocal()
             try:
                 from app.utils.categories import is_streamer_tracked_live
@@ -1366,14 +1369,16 @@ class StreamTrackerBot(discord.Client):
                 import io
                 buf = io.BytesIO(to_bytes(img))
                 file = discord.File(buf, filename="stats.png")
-                await interaction.followup.send(file=file)
+                await interaction.followup.send(file=file, ephemeral=ephemeral)
             finally:
                 db.close()
 
         # ── /info ──
 
         @self.tree.command(name="info", description="How the stream tracker works")
-        async def cmd_info(interaction):
+        @app_commands.describe(public="Show the response to everyone")
+        async def cmd_info(interaction, public: bool = False):
+            ephemeral = not public
             from app.services.points import (
                 POINTS_PER_MINUTE,
                 DAILY_BONUS_POINTS,
@@ -1396,7 +1401,7 @@ class StreamTrackerBot(discord.Client):
             import io
             buf = io.BytesIO(to_bytes(img))
             file = discord.File(buf, filename="info.png")
-            await interaction.response.send_message(file=file)
+            await interaction.response.send_message(file=file, ephemeral=ephemeral)
 
         # ── /admin ──
 
@@ -1413,7 +1418,8 @@ class StreamTrackerBot(discord.Client):
                     .scalar()
                 )
                 embed = discord.Embed(title="Admin Panel", description="Select an action below.", color=ACCENT)
-                await interaction.response.send_message(embed=embed, view=AdminView(pending_count=pending_count), ephemeral=True)
+                await interaction.response.send_message(embed=embed, view=AdminView(pending_count=pending_count),
+                                                        ephemeral=True)
             finally:
                 db.close()
 
