@@ -810,9 +810,13 @@ class StreamTrackerBot(discord.Client):
 
         try:
             import os
-            db_path = "/data/stream_tracker.db"
+            db_url = settings.database_url
+            db_path = db_url.replace("sqlite:///", "", 1)
+            if not os.path.isabs(db_path):
+                db_path = os.path.join(os.getcwd(), db_path)
+
             if not os.path.exists(db_path):
-                await message.reply("```diff\n- Database file not found\n```")
+                await message.reply(f"```diff\n- Database not found at {db_path}\n```")
                 return
 
             size_mb = os.path.getsize(db_path) / (1024 * 1024)
