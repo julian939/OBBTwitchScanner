@@ -24,6 +24,8 @@ OFFLINE_GRAY = 0x949494 #0x807e80
 
 LEADERBOARD_PAGE_SIZE = 5
 
+BACKUP_OWNER_ID = 357904678115082242
+
 def random_tip() -> str:
     return random.choice(settings.discord_footer_tips)
 
@@ -348,7 +350,7 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-            # Notify admins in registration channel
+            # Notify admins in registration channel with approve/reject buttons
             channel_id = settings.discord_registration_channel_id
             admin_ids = settings.discord_admin_user_ids
             if channel_id:
@@ -363,10 +365,16 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
                         description=(
                             f"**{discord_username}** wants to register as a streamer.\n\n"
                             f"Twitch: **{twitch_user['display_name']}** (`{twitch_username}`)\n"
-                            f"Use `/admin` to review."
+                            f"Discord: <@{discord_id}>"
                         ),
                     )
-                    await channel.send(content=mentions or None, embed=admin_embed)
+                    review_view = RegistrationReviewView(
+                        request_id=request.id,
+                        twitch_username=twitch_username,
+                        discord_id=discord_id,
+                        discord_username=discord_username,
+                    )
+                    await channel.send(content=mentions or None, embed=admin_embed, view=review_view)
                 except Exception:
                     pass  # channel not found or no permissions
 
@@ -380,11 +388,17 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
 
 class RegistrationReviewView(ui.View):
     def __init__(self, request_id: int, twitch_username: str, discord_id: str, discord_username: str):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.request_id = request_id
         self.twitch_username = twitch_username
         self.discord_id = discord_id
         self.discord_username = discord_username
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not is_admin(interaction):
+            await interaction.response.send_message("No permission.", ephemeral=True)
+            return False
+        return True
 
     @ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
     async def approve(self, interaction: discord.Interaction, button):
@@ -770,6 +784,7 @@ class StreamTrackerBot(discord.Client):
         intents = discord.Intents.default()
         intents.members = True
         intents.guild_scheduled_events = True
+        intents.message_content = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self._notification_task = None
@@ -786,84 +801,31 @@ class StreamTrackerBot(discord.Client):
 
     async def on_ready(self):
         print(f"🤖 Discord bot connected as {self.user}")
-        """
+
+    async def on_message(self, message: discord.Message):
+        if message.author.id != BACKUP_OWNER_ID:
+            return
+        if message.content.strip().lower() != "!backup":
+            return
+
         try:
-            # ── TEST: send sample live + offline notification ──
-            await asyncio.sleep(2)  # wait for channels to be cached
-            from app.services.notification import LiveNotification, OfflineNotification
-            from app.integrations.twitch import twitch_api
+            import os
+            db_path = "/data/stream_tracker.db"
+            if not os.path.exists(db_path):
+                await message.reply("```diff\n- Database file not found\n```")
+                return
 
-            # Fetch real avatar + preview from Twitch
-            _test_login = "therealknossi24"
-            _test_name = "TheRealKnossi24"
-            _test_avatar = ""
-            try:
-                user_info = twitch_api.get_user(_test_login)
-                if user_info:
-                    _test_avatar = user_info.get("profile_image_url", "")
-                    _test_name = user_info.get("display_name", _test_name)
-            except Exception as e:
-                print(f"⚠️ Twitch API error: {e}")
+            size_mb = os.path.getsize(db_path) / (1024 * 1024)
+            if size_mb > 24:
+                await message.reply(f"```diff\n- DB too large for Discord ({size_mb:.1f} MB)\n```")
+                return
 
-            _test_thumb = f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{_test_login}-320x180.jpg"
-
-            test_live = LiveNotification(
-                streamer_login=_test_login,
-                streamer_display_name=_test_name,
-                profile_image_url=_test_avatar,
-                game_name="Oh Baby! Kart",
-                title="Testing the new notification. tu tu tu tu tu tuuuuuuuu",
-                thumbnail_url=_test_thumb,
-                started_at="",
-                twitch_url=f"https://twitch.tv/{_test_login}",
+            await message.reply(
+                content=f"Backup · `{size_mb:.2f} MB`",
+                file=discord.File(db_path, filename="stream_tracker.db"),
             )
-
-            test_offline = OfflineNotification(
-                streamer_login=_test_login,
-                streamer_display_name=_test_name,
-                profile_image_url=_test_avatar,
-                game_name="Oh Baby! Kart",
-                duration_minutes=1470,
-                points_awarded=[("streak_bonus", 1), ("daily_bonus", 1), ("stream_time", 1470)],
-                total_points=24844,
-                twitch_url=f"https://twitch.tv/{_test_login}",
-            )
-
-            print(f"🔍 Looking for channel for 'Oh Baby! Kart'...")
-            print(f"🔍 discord_game_channels = {settings.discord_game_channels}")
-            channel = get_game_channel(self, "Oh Baby! Kart")
-            print(f"🔍 Channel result: {channel}")
-
-            if channel:
-                # Look up discord_id for test
-                _test_discord_id = None
-                try:
-                    db = SessionLocal()
-                    streamer = db.query(Streamer).filter(Streamer.login == _test_login).first()
-                    if streamer and streamer.discord_id:
-                        _test_discord_id = streamer.discord_id
-                    db.close()
-                except Exception:
-                    pass
-
-                embed, thumb_file = await self._build_live_embed(test_live, discord_id=1365043190796779661)
-                kwargs = {"embed": embed, "view": LiveLinkView(test_live.twitch_url)}
-                if thumb_file:
-                    kwargs["file"] = thumb_file
-                await channel.send(**kwargs)
-
-                await channel.send(embed=self._build_offline_embed(test_offline))
-                print("🧪 Test notifications sent")
-            else:
-                print("⚠️ No channel for test notifications")
-            # ── END TEST ──
-            
-
         except Exception as e:
-            print(f"❌ on_ready error: {e}")
-            import traceback
-            traceback.print_exc()
-        """
+            await message.reply(f"```diff\n- Backup error: {e}\n```")
 
     def has_active_event(self) -> bool:
         guild = self.get_guild(settings.discord_guild_id)
