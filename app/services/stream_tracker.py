@@ -127,7 +127,7 @@ def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
             except Exception:
                 multiplier = 1
 
-            award_stream_end_points(streamer_id, open_stream, db, multiplier=multiplier)
+            award_stream_end_points(streamer_id, open_stream, db, multiplier=multiplier, end_time=offline_at)
 
             points_list = _get_stream_points_summary(open_stream.id, db)
             db.commit()
@@ -312,7 +312,7 @@ def _close_stream_for_category_change(
     except Exception:
         multiplier = 1
 
-    award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
+    award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier, end_time=now)
 
     points_list = _get_stream_points_summary(open_stream.id, db)
     db.commit()

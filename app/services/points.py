@@ -62,9 +62,9 @@ def award_live_points(db: Session, multiplier: int = 1) -> int:
     return total_awarded
 
 
-def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multiplier: int = 1) -> list[PointTransaction]:
+def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multiplier: int = 1, end_time: datetime | None = None) -> list[PointTransaction]:
     transactions = []
-    now = datetime.now(timezone.utc)
+    now = end_time or datetime.now(timezone.utc)
 
     # Remaining stream time points
     if stream.last_points_at:
