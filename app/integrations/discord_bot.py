@@ -190,7 +190,10 @@ class PaginatorView(ui.View):
     async def on_timeout(self):
         if self.message:
             try:
-                await self.message.edit(view=None)
+                if self.current != 0:
+                    await self.message.edit(embed=self.pages[0], view=None)
+                else:
+                    await self.message.edit(view=None)
             except Exception:
                 pass
 

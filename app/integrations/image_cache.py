@@ -19,7 +19,7 @@ settings = get_settings()
 
 router = APIRouter()
 
-_IMAGE_TTL_SECONDS = 300  # 5 minutes
+_IMAGE_TTL_SECONDS = 910  # 15 minutes and 10 seconds (buffer)
 _store: dict[str, tuple[bytes, float]] = {}  # id -> (png_bytes, created_at)
 
 
