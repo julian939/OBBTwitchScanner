@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from app.database.database import init_db, SessionLocal
 from app.api import webhook, admin, public
+from app.integrations.image_cache import router as image_router
 
 
 @asynccontextmanager
@@ -82,3 +83,4 @@ app = FastAPI(title="Twitch Stream Tracker", lifespan=lifespan)
 app.include_router(webhook.router)
 app.include_router(admin.router)
 app.include_router(public.router)
+app.include_router(image_router)

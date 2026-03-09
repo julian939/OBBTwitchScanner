@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     webhook_secret: str
     webhook_callback_url: str
 
+    base_url: str
+
     # Admin
     admin_secret: str
 

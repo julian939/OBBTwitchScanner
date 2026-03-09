@@ -16,6 +16,7 @@ from app.services.notification import (
     LiveNotification,
     OfflineNotification,
 )
+from app.integrations.image_cache import store_image, get_image_url
 
 settings = get_settings()
 
@@ -208,50 +209,6 @@ class PaginatorView(ui.View):
         self.current = min(len(self.pages) - 1, self.current + 1)
         self._update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.current], view=self)
-
-
-class ImagePaginatorView(ui.View):
-    """Paginator for image-based pages (e.g. leaderboard)."""
-
-    def __init__(self, image_bytes_list, current=0):
-        super().__init__(timeout=300)
-        self.image_bytes_list = image_bytes_list  # list of PNG bytes
-        self.current = current
-        self.message = None  # set after sending
-        self._update_buttons()
-
-    def _update_buttons(self):
-        self.prev_btn.disabled = self.current == 0
-        self.next_btn.disabled = self.current >= len(self.image_bytes_list) - 1
-        self.counter.label = f"{self.current + 1}/{len(self.image_bytes_list)}"
-
-    def _current_file(self):
-        import io
-        buf = io.BytesIO(self.image_bytes_list[self.current])
-        return discord.File(buf, filename="leaderboard.png")
-
-    async def on_timeout(self):
-        if self.message:
-            try:
-                await self.message.edit(view=None)
-            except Exception:
-                pass
-
-    @ui.button(label="◂", style=discord.ButtonStyle.secondary)
-    async def prev_btn(self, interaction, button):
-        self.current = max(0, self.current - 1)
-        self._update_buttons()
-        await interaction.response.edit_message(attachments=[self._current_file()], view=self)
-
-    @ui.button(label="1/1", style=discord.ButtonStyle.secondary, disabled=True)
-    async def counter(self, interaction, button):
-        pass
-
-    @ui.button(label="▸", style=discord.ButtonStyle.secondary)
-    async def next_btn(self, interaction, button):
-        self.current = min(len(self.image_bytes_list) - 1, self.current + 1)
-        self._update_buttons()
-        await interaction.response.edit_message(attachments=[self._current_file()], view=self)
 
 
 # ── Registration ───────────────────────────────────────────────
@@ -970,7 +927,6 @@ class StreamTrackerBot(discord.Client):
             embed.set_thumbnail(url=streamer.profile_image_url)
 
         embed.set_footer(text=f"⏱ {uptime}  ·  twitch.tv/{streamer.login}")
-        #embed.timestamp = now
         return embed
 
     # ── Leaderboard Builder ────────────────────────────────────
@@ -1171,16 +1127,20 @@ class StreamTrackerBot(discord.Client):
                     embed.set_footer(text=random_tip())
                     await interaction.followup.send(embed=embed, ephemeral=ephemeral)
                 elif len(image_bytes) == 1:
-                    import io
-                    buf = io.BytesIO(image_bytes[0])
-                    file = discord.File(buf, filename="leaderboard.png")
-                    await interaction.followup.send(file=file, ephemeral=ephemeral)
+                    url = get_image_url(store_image(image_bytes[0]))
+                    embed = discord.Embed(color=ACCENT)
+                    embed.set_image(url=url)
+                    await interaction.followup.send(embed=embed, ephemeral=ephemeral)
                 else:
-                    view = ImagePaginatorView(image_bytes)
-                    import io
-                    buf = io.BytesIO(image_bytes[0])
-                    file = discord.File(buf, filename="leaderboard.png")
-                    msg = await interaction.followup.send(file=file, view=view, ephemeral=ephemeral)
+                    pages = []
+                    for img_bytes in image_bytes:
+                        url = get_image_url(store_image(img_bytes))
+                        embed = discord.Embed(color=ACCENT)
+                        embed.set_image(url=url)
+                        pages.append(embed)
+
+                    view = PaginatorView(pages)
+                    msg = await interaction.followup.send(embed=pages[0], view=view, ephemeral=ephemeral)
                     view.message = msg
             finally:
                 db.close()
@@ -1332,10 +1292,10 @@ class StreamTrackerBot(discord.Client):
                     "live_list": live_list,
                 }, tip=random_tip())
 
-                import io
-                buf = io.BytesIO(to_bytes(img))
-                file = discord.File(buf, filename="stats.png")
-                await interaction.followup.send(file=file, ephemeral=ephemeral)
+                url = get_image_url(store_image(to_bytes(img)))
+                embed = discord.Embed(color=ACCENT)
+                embed.set_image(url=url)
+                await interaction.followup.send(embed=embed, ephemeral=ephemeral)
             finally:
                 db.close()
 
@@ -1345,6 +1305,7 @@ class StreamTrackerBot(discord.Client):
         @app_commands.describe(public="Show the response to everyone")
         async def cmd_info(interaction, public: bool = False):
             ephemeral = not public
+            await interaction.response.defer(ephemeral=ephemeral)
             from app.services.points import (
                 POINTS_PER_MINUTE,
                 DAILY_BONUS_POINTS,
@@ -1364,10 +1325,10 @@ class StreamTrackerBot(discord.Client):
                 event_multiplier=EVENT_MULTIPLIER,
             )
 
-            import io
-            buf = io.BytesIO(to_bytes(img))
-            file = discord.File(buf, filename="info.png")
-            await interaction.response.send_message(file=file, ephemeral=ephemeral)
+            url = get_image_url(store_image(to_bytes(img)))
+            embed = discord.Embed(color=ACCENT)
+            embed.set_image(url=url)
+            await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
         # ── /admin ──
 
