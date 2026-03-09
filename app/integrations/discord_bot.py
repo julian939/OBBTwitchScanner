@@ -573,6 +573,52 @@ class RemoveStreamerModal(ui.Modal, title="Remove Streamer"):
             db.close()
 
 
+class RefreshStreamerModal(ui.Modal, title="Refresh Streamer"):
+    discord_id = ui.TextInput(label="Discord User ID", placeholder="e.g. 123456789012345678", max_length=20)
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        db = SessionLocal()
+        try:
+            streamer = db.query(Streamer).filter(Streamer.discord_id == self.discord_id.value.strip()).first()
+            if not streamer:
+                await interaction.followup.send(
+                    f"```diff\n- No streamer found for Discord ID '{self.discord_id.value}'\n```",
+                    ephemeral=True,
+                )
+                return
+
+            from app.integrations.twitch import twitch_api
+            data = twitch_api.get_user_by_id(streamer.id)
+            if not data:
+                await interaction.followup.send("```diff\n- Could not fetch data from Twitch\n```", ephemeral=True)
+                return
+
+            old_login = streamer.login
+            old_display = streamer.display_name
+
+            streamer.login = data["login"]
+            streamer.display_name = data["display_name"]
+            streamer.profile_image_url = data.get("profile_image_url") or streamer.profile_image_url
+            db.commit()
+
+            embed = discord.Embed(color=ACCENT)
+            changed = old_login != streamer.login or old_display != streamer.display_name
+            if changed:
+                embed.description = (
+                    f"```diff\n+ Streamer refreshed\n```\n"
+                    f"Login: `{old_login}` → `{streamer.login}`\n"
+                    f"Display: `{old_display}` → `{streamer.display_name}`"
+                )
+            else:
+                embed.description = f"```diff\n+ {streamer.login} — no changes\n```"
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
+        finally:
+            db.close()
+
+
 class UpdatePointsModal(ui.Modal, title="Update Points"):
     username = ui.TextInput(label="Twitch Username", placeholder="e.g. gronkh", max_length=50)
     points = ui.TextInput(label="Points (negative to deduct)", placeholder="e.g. 500 or -200")
@@ -625,6 +671,7 @@ class AdminSelect(ui.Select):
         options = [
             discord.SelectOption(label="Add Streamer", value="add", description="Track a new streamer", emoji="➕"),
             discord.SelectOption(label="Remove Streamer", value="remove", description="Stop tracking a streamer", emoji="➖"),
+            discord.SelectOption(label="Refresh Streamer", value="refresh", description="Sync name from Twitch", emoji="🔁"),
             discord.SelectOption(label="Update Points", value="points", description="Add or deduct points", emoji="💰"),
             discord.SelectOption(label="List Streamers", value="list", description="Show all tracked streamers", emoji="📋"),
             discord.SelectOption(label=pending_label, value="pending", description="Review registration requests", emoji="📝"),
@@ -640,6 +687,9 @@ class AdminSelect(ui.Select):
 
         elif choice == "remove":
             await interaction.response.send_modal(RemoveStreamerModal())
+
+        elif choice == "refresh":
+            await interaction.response.send_modal(RefreshStreamerModal())
 
         elif choice == "points":
             await interaction.response.send_modal(UpdatePointsModal())
