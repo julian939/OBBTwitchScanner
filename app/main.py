@@ -56,10 +56,11 @@ async def lifespan(app: FastAPI):
         db.close()
 
     # Start background tasks
-    from app.services.scheduler import periodic_reconciliation, periodic_live_points
+    from app.services.scheduler import periodic_reconciliation, periodic_live_points, periodic_name_refresh
     recon_task = asyncio.create_task(periodic_reconciliation())
     points_task = asyncio.create_task(periodic_live_points())
-    print("⏰ Scheduled: reconciliation + live points")
+    name_refresh_task = asyncio.create_task(periodic_name_refresh())
+    print("⏰ Scheduled: reconciliation + live points + name refresh")
 
     from app.integrations.discord_bot import run_bot
     bot_task = asyncio.create_task(run_bot())
@@ -69,6 +70,7 @@ async def lifespan(app: FastAPI):
 
     recon_task.cancel()
     points_task.cancel()
+    name_refresh_task.cancel()
     bot_task.cancel()
 
     from app.integrations.discord_bot import bot

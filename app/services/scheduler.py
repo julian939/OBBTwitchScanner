@@ -28,6 +28,44 @@ async def periodic_reconciliation():
             db.close()
 
 
+async def periodic_name_refresh():
+    """Daily: refresh login/display_name/profile_image_url for all streamers via Twitch ID."""
+    interval = 24 * 60 * 60
+    while True:
+        await asyncio.sleep(interval)
+        print("🔁 Running daily name refresh...")
+        from app.integrations.twitch import twitch_api
+        from app.database.models import Streamer
+        db = SessionLocal()
+        try:
+            streamers = db.query(Streamer).all()
+            updated = 0
+            for streamer in streamers:
+                data = twitch_api.get_user_by_id(streamer.id)
+                if not data:
+                    continue
+                changed = False
+                if streamer.login != data["login"]:
+                    print(f"  🔄 Login: {streamer.login} → {data['login']}")
+                    streamer.login = data["login"]
+                    changed = True
+                if streamer.display_name != data["display_name"]:
+                    print(f"  🔄 Display: {streamer.display_name} → {data['display_name']}")
+                    streamer.display_name = data["display_name"]
+                    changed = True
+                if data.get("profile_image_url") and streamer.profile_image_url != data["profile_image_url"]:
+                    streamer.profile_image_url = data["profile_image_url"]
+                    changed = True
+                if changed:
+                    updated += 1
+            db.commit()
+            print(f"✅ Name refresh done: {updated}/{len(streamers)} updated")
+        except Exception as e:
+            print(f"❌ Name refresh failed: {e}")
+        finally:
+            db.close()
+
+
 async def periodic_live_points():
     interval = LIVE_POINTS_INTERVAL_MINUTES * 60
     while True:
