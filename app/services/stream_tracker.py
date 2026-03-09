@@ -149,6 +149,7 @@ def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
                 )
             else:
                 queue_offline_notification(
+                    streamer_id=streamer_id,
                     streamer_login=streamer.login,
                     streamer_display_name=streamer.display_name,
                     profile_image_url=streamer.profile_image_url or "",
@@ -237,6 +238,7 @@ def handle_stream_online(event: dict, db: Session) -> None:
 
     # Send live notification (no cooldown needed — delayed offline handles reconnects)
     queue_live_notification(
+        streamer_id=streamer_id,
         streamer_login=streamer_login,
         streamer_display_name=streamer_name,
         profile_image_url=streamer.profile_image_url or "",
@@ -327,6 +329,7 @@ def _close_stream_for_category_change(
 
     if not _is_offline_too_short(duration_minutes):
         queue_offline_notification(
+            streamer_id=streamer.id,
             streamer_login=streamer.login,
             streamer_display_name=streamer.display_name,
             profile_image_url=streamer.profile_image_url or "",
@@ -367,6 +370,7 @@ def handle_category_change(streamer_id: str, new_game: str, db: Session) -> None
 
                 stream_info = twitch_api.get_stream_info(streamer_id)
                 queue_live_notification(
+                    streamer_id=streamer_id,
                     streamer_login=streamer.login,
                     streamer_display_name=streamer.display_name,
                     profile_image_url=streamer.profile_image_url or "",
@@ -394,6 +398,7 @@ def handle_category_change(streamer_id: str, new_game: str, db: Session) -> None
 
             stream_info = twitch_api.get_stream_info(streamer_id)
             queue_live_notification(
+                streamer_id=streamer_id,
                 streamer_login=streamer.login,
                 streamer_display_name=streamer.display_name,
                 profile_image_url=streamer.profile_image_url or "",

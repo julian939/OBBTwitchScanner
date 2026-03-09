@@ -818,7 +818,7 @@ class StreamTrackerBot(discord.Client):
                     discord_id = None
                     try:
                         db = SessionLocal()
-                        streamer = db.query(Streamer).filter(Streamer.login == n.streamer_login).first()
+                        streamer = db.query(Streamer).filter(Streamer.id == n.streamer_id).first()
                         if streamer and streamer.discord_id:
                             discord_id = streamer.discord_id
                         db.close()

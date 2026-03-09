@@ -7,6 +7,7 @@ from dataclasses import dataclass
 @dataclass
 class LiveNotification:
     """Data for a stream.online notification."""
+    streamer_id: str
     streamer_login: str
     streamer_display_name: str
     profile_image_url: str
@@ -20,6 +21,7 @@ class LiveNotification:
 @dataclass
 class OfflineNotification:
     """Data for a stream.offline notification."""
+    streamer_id: str
     streamer_login: str
     streamer_display_name: str
     profile_image_url: str
@@ -35,6 +37,7 @@ notification_queue: asyncio.Queue = asyncio.Queue()
 
 
 def queue_live_notification(
+    streamer_id: str,
     streamer_login: str,
     streamer_display_name: str,
     profile_image_url: str,
@@ -45,6 +48,7 @@ def queue_live_notification(
 ) -> None:
     """Queue a live notification (called from sync context)."""
     notification = LiveNotification(
+        streamer_id=streamer_id,
         streamer_login=streamer_login,
         streamer_display_name=streamer_display_name,
         profile_image_url=profile_image_url or "",
@@ -63,6 +67,7 @@ def queue_live_notification(
 
 
 def queue_offline_notification(
+    streamer_id: str,
     streamer_login: str,
     streamer_display_name: str,
     profile_image_url: str,
@@ -73,6 +78,7 @@ def queue_offline_notification(
 ) -> None:
     """Queue an offline notification (called from sync context)."""
     notification = OfflineNotification(
+        streamer_id=streamer_id,
         streamer_login=streamer_login,
         streamer_display_name=streamer_display_name,
         profile_image_url=profile_image_url or "",
