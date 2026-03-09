@@ -841,9 +841,10 @@ class StreamTrackerBot(discord.Client):
     # ── Notification Embeds ────────────────────────────────────
 
     async def _build_live_embed(self, n, discord_id=None):
-        author = n.streamer_display_name
+        author = n.streamer_login
         if discord_id:
-            member = self.get_user(int(discord_id))
+            guild = self.get_guild(settings.discord_guild_id)
+            member = guild.get_member(int(discord_id)) if guild else None
             if member:
                 author += f" ({member.display_name})"
         author += " is live"
@@ -886,7 +887,7 @@ class StreamTrackerBot(discord.Client):
 
         embed = discord.Embed(color=OFFLINE_GRAY)
         embed.set_author(
-            name=f"{n.streamer_display_name} went offline",
+            name=f"{n.streamer_login} went offline",
             icon_url=n.profile_image_url if n.profile_image_url else None,
         )
         desc = ""
@@ -1112,7 +1113,7 @@ class StreamTrackerBot(discord.Client):
 
                     entries.append({
                         "rank": i + 1,
-                        "display_name": r.display_name,
+                        "display_name": r.login,
                         "login": r.login,
                         "is_live": r.is_live,
                         "tracked_live": tracked_live,
@@ -1196,7 +1197,7 @@ class StreamTrackerBot(discord.Client):
                 is_live = s.is_live
 
                 embed = discord.Embed(
-                    title=s.display_name,
+                    title=s.login,
                     url=f"https://twitch.tv/{s.login}",
                     color=ACCENT,
                 )
