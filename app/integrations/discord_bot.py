@@ -120,9 +120,14 @@ def get_streak(streamer_id, db):
 
 
 def is_admin(interaction: discord.Interaction) -> bool:
-    if not settings.discord_admin_role_ids:
-        return False
-    return any(role.id in settings.discord_admin_role_ids for role in interaction.user.roles)
+    user_role_ids = {role.id for role in interaction.user.roles}
+    if not user_role_ids and interaction.guild:
+        member = interaction.guild.get_member(interaction.user.id)
+        if member:
+            user_role_ids = {role.id for role in member.roles}
+    if settings.discord_admin_role_ids and user_role_ids & set(settings.discord_admin_role_ids):
+        return True
+    return bool(settings.discord_admin_user_ids and interaction.user.id in settings.discord_admin_user_ids)
 
 
 def get_game_channel(bot_instance, game_name: str):
