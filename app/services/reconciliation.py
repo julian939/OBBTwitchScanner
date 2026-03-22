@@ -62,6 +62,7 @@ def _close_stream_and_notify(streamer, open_stream, now, db):
             print(f"⏳ {streamer.display_name} offline notification suppressed ({duration_minutes}min too short)")
         else:
             queue_offline_notification(
+                streamer_id=streamer.id,
                 streamer_login=streamer.login,
                 streamer_display_name=streamer.display_name,
                 profile_image_url=streamer.profile_image_url or "",
@@ -84,6 +85,11 @@ def reconcile_live_states(db: Session) -> dict:
     streams_closed = 0
 
     for streamer in streamers:
+        if streamer.is_locked:
+            if streamer.discord_id:
+                remove_live_role(streamer.discord_id)
+            continue
+
         actually_live = twitch_api.is_stream_live(streamer.id)
 
         open_stream = (
@@ -112,6 +118,10 @@ def reconcile_live_states(db: Session) -> dict:
         # Case 2: Twitch says live
         elif actually_live:
             if not streamer.is_live:
+                # If a pending offline timer is running, the webhook said offline
+                # but Twitch API hasn't caught up yet — let the timer handle it
+                if has_pending_offline(streamer.id):
+                    continue
                 fixed_online += 1
             streamer.is_live = True
 
@@ -144,6 +154,7 @@ def reconcile_live_states(db: Session) -> dict:
 
                     started_at_str = started_at.isoformat() if hasattr(started_at, 'isoformat') else str(started_at)
                     queue_live_notification(
+                        streamer_id=streamer.id,
                         streamer_login=streamer.login,
                         streamer_display_name=streamer.display_name,
                         profile_image_url=streamer.profile_image_url or "",

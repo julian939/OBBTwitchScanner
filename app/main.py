@@ -15,6 +15,9 @@ async def lifespan(app: FastAPI):
     init_db()
     print("✅ Database initialized")
 
+    from app.migrations.add_is_locked import run as run_add_is_locked
+    run_add_is_locked()
+
     # Re-register all EventSub subscriptions with current callback URL
     from app.integrations.twitch import twitch_api
     from app.database.models import Streamer, Subscription

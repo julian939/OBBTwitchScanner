@@ -14,6 +14,7 @@ class Streamer(Base):
     profile_image_url = Column(String, nullable=True)
     discord_id = Column(String, nullable=True, unique=True)
     is_live = Column(Boolean, default=False)
+    is_locked = Column(Boolean, default=False, server_default="0")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     streams = relationship("Stream", back_populates="streamer")

@@ -7,9 +7,11 @@ fetch them via URL instead of file attachments (fixes mobile rendering).
 
 from __future__ import annotations
 
+import io
 import uuid
 import time
 
+import discord
 from fastapi import APIRouter
 from fastapi.responses import Response
 
@@ -43,6 +45,22 @@ def _cleanup():
     expired = [k for k, (_, created) in _store.items() if now - created > _IMAGE_TTL_SECONDS]
     for k in expired:
         del _store[k]
+
+
+ACCENT = 0x9146FF  # Twitch purple
+
+
+def embed_with_image(png_bytes: bytes, filename: str) -> tuple[discord.Embed, discord.File | None]:
+    """Return (embed, file_or_none). Pass file as kwarg only when not None."""
+    embed = discord.Embed(color=ACCENT)
+    if settings.local_dev:
+        file = discord.File(io.BytesIO(png_bytes), filename=filename)
+        embed.set_image(url=f"attachment://{filename}")
+        return embed, file
+    else:
+        url = get_image_url(store_image(png_bytes))
+        embed.set_image(url=url)
+        return embed, None
 
 
 @router.get("/images/{image_id}.png")

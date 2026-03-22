@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     # Database
     database_url: str
 
+    local_dev: bool = False
+
     # Notification cooldowns
     notify_offline_delay_minutes: int = 5
     notify_offline_min_duration_minutes: int = 5

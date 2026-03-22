@@ -127,7 +127,7 @@ async def sync_leaderboard_roles(db: Session):
             func.coalesce(func.sum(PointTransaction.points), 0).label("pts"),
         )
         .outerjoin(PointTransaction, PointTransaction.streamer_id == Streamer.id)
-        .filter(Streamer.discord_id.isnot(None))
+        .filter(Streamer.discord_id.isnot(None), Streamer.is_locked == False)
         .group_by(Streamer.id)
         .order_by(func.coalesce(func.sum(PointTransaction.points), 0).desc())
         .limit(5)

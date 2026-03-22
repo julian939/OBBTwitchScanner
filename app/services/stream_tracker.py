@@ -93,6 +93,9 @@ def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
             if not streamer:
                 return
 
+            if streamer.is_locked:
+                return
+
             # If streamer came back online in the meantime → abort
             if streamer.is_live:
                 print(f"⏳ {streamer.display_name} is live again, skipping offline finalization")
@@ -204,6 +207,10 @@ def handle_stream_online(event: dict, db: Session) -> None:
             break
 
     game_name = stream_info["game_name"] if stream_info else ""
+
+    if streamer.is_locked:
+        print(f"🔒 {streamer_name} is locked, ignoring online event")
+        return
 
     if not is_tracked_category(game_name):
         print(f"⏭️ {streamer_name} went live in '{game_name}' (untracked)")
@@ -351,6 +358,9 @@ def handle_category_change(streamer_id: str, new_game: str, db: Session) -> None
     with lock:
         streamer = db.query(Streamer).filter(Streamer.id == streamer_id).first()
         if not streamer:
+            return
+
+        if streamer.is_locked:
             return
 
         open_stream = (

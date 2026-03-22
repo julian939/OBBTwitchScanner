@@ -26,7 +26,7 @@ def award_live_points(db: Session, multiplier: int = 1) -> int:
     open_streams = (
         db.query(Stream)
         .join(Streamer)
-        .filter(Stream.ended_at.is_(None), Streamer.is_live == True)
+        .filter(Stream.ended_at.is_(None), Streamer.is_live == True, Streamer.is_locked == False)
         .all()
     )
 
