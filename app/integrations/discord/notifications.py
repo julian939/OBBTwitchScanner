@@ -14,6 +14,32 @@ from app.integrations.discord.views import LiveLinkView
 
 settings = get_settings()
 
+_MAX_SEND_ATTEMPTS = 3
+_BASE_RETRY_DELAY = 2
+
+
+async def _send_with_retry(channel, **kwargs):
+    for attempt in range(1, _MAX_SEND_ATTEMPTS + 1):
+        try:
+            await channel.send(**kwargs)
+            return
+        except discord.errors.DiscordServerError:
+            if attempt == _MAX_SEND_ATTEMPTS:
+                raise
+            delay = _BASE_RETRY_DELAY * (2 ** (attempt - 1))
+            print(f"⚠️ Discord 5xx error, retry {attempt}/{_MAX_SEND_ATTEMPTS} in {delay}s")
+            await asyncio.sleep(delay)
+        except discord.errors.HTTPException as e:
+            if e.status == 429 and attempt < _MAX_SEND_ATTEMPTS:
+                delay = getattr(e, 'retry_after', _BASE_RETRY_DELAY * (2 ** (attempt - 1)))
+                print(f"⚠️ Rate limited, retry {attempt}/{_MAX_SEND_ATTEMPTS} in {delay}s")
+                await asyncio.sleep(delay)
+            else:
+                raise
+        f = kwargs.get("file")
+        if f is not None:
+            f.reset(seek=True)
+
 
 async def notification_listener(bot_instance):
     await bot_instance.wait_until_ready()
@@ -40,9 +66,9 @@ async def notification_listener(bot_instance):
                 kwargs = {"embed": embed, "view": LiveLinkView(n.twitch_url)}
                 if thumb_file:
                     kwargs["file"] = thumb_file
-                await channel.send(**kwargs)
+                await _send_with_retry(channel, **kwargs)
             elif isinstance(n, OfflineNotification):
-                await channel.send(embed=build_offline_embed(n))
+                await _send_with_retry(channel, embed=build_offline_embed(n))
         except asyncio.CancelledError:
             break
         except Exception as e:
