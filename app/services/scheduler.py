@@ -113,6 +113,9 @@ async def _send_backup():
         print("⚠️ Backup skipped: discord_backup_channel_id not configured")
         return
 
+    from app.integrations.discord_bot import bot
+    await bot.wait_until_ready()
+
     db_url = settings.database_url
     db_path = db_url.replace("sqlite:///", "", 1)
     if not os.path.isabs(db_path):
@@ -127,7 +130,6 @@ async def _send_backup():
         print(f"❌ Backup failed: DB too large ({size_mb:.1f} MB)")
         return
 
-    from app.integrations.discord_bot import bot
     try:
         channel = bot.get_channel(settings.discord_backup_channel_id) or await bot.fetch_channel(settings.discord_backup_channel_id)
     except Exception:
