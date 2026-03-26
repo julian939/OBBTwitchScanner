@@ -15,9 +15,6 @@ async def lifespan(app: FastAPI):
     init_db()
     print("✅ Database initialized")
 
-    from app.migrations.add_is_locked import run as run_add_is_locked
-    run_add_is_locked()
-
     # Re-register all EventSub subscriptions with current callback URL
     from app.integrations.twitch import twitch_api
     from app.database.models import Streamer, Subscription
@@ -59,11 +56,12 @@ async def lifespan(app: FastAPI):
         db.close()
 
     # Start background tasks
-    from app.services.scheduler import periodic_reconciliation, periodic_live_points, periodic_name_refresh
+    from app.services.scheduler import periodic_reconciliation, periodic_live_points, periodic_name_refresh, periodic_backup
     recon_task = asyncio.create_task(periodic_reconciliation())
     points_task = asyncio.create_task(periodic_live_points())
     name_refresh_task = asyncio.create_task(periodic_name_refresh())
-    print("⏰ Scheduled: reconciliation + live points + name refresh")
+    backup_task = asyncio.create_task(periodic_backup())
+    print("⏰ Scheduled: reconciliation + live points + name refresh + backup")
 
     from app.integrations.discord_bot import run_bot
     bot_task = asyncio.create_task(run_bot())
@@ -74,6 +72,7 @@ async def lifespan(app: FastAPI):
     recon_task.cancel()
     points_task.cancel()
     name_refresh_task.cancel()
+    backup_task.cancel()
     bot_task.cancel()
 
     from app.integrations.discord_bot import bot
