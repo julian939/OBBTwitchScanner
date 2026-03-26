@@ -104,14 +104,14 @@ def _save_last_backup_date():
     open(_last_backup_path(), "w").write(date.today().isoformat())
 
 
-async def _send_backup():
-    """Send the SQLite DB file to the configured Discord backup channel."""
+async def _send_backup() -> bool:
+    """Send the SQLite DB file to the configured Discord backup channel. Returns True on success."""
     import os
     import discord
 
     if not settings.discord_backup_channel_id:
         print("⚠️ Backup skipped: discord_backup_channel_id not configured")
-        return
+        return False
 
     from app.integrations.discord_bot import bot
     await bot.wait_until_ready()
@@ -123,24 +123,25 @@ async def _send_backup():
 
     if not os.path.exists(db_path):
         print(f"❌ Backup failed: DB not found at {db_path}")
-        return
+        return False
 
     size_mb = os.path.getsize(db_path) / (1024 * 1024)
     if size_mb > 24:
         print(f"❌ Backup failed: DB too large ({size_mb:.1f} MB)")
-        return
+        return False
 
     try:
         channel = bot.get_channel(settings.discord_backup_channel_id) or await bot.fetch_channel(settings.discord_backup_channel_id)
     except Exception:
         print(f"❌ Backup failed: channel {settings.discord_backup_channel_id} not found")
-        return
+        return False
 
     await channel.send(
         content=f"Daily backup · `{size_mb:.2f} MB`",
         file=discord.File(db_path, filename="stream_tracker.db"),
     )
     print(f"✅ Backup sent to channel {settings.discord_backup_channel_id}")
+    return True
 
 
 async def periodic_backup():
@@ -156,8 +157,8 @@ async def periodic_backup():
     if last != today and already_past:
         print("💾 Missed backup detected — sending now...")
         try:
-            await _send_backup()
-            _save_last_backup_date()
+            if await _send_backup():
+                _save_last_backup_date()
         except Exception as e:
             print(f"❌ Catch-up backup failed: {e}")
 
@@ -167,8 +168,8 @@ async def periodic_backup():
         await asyncio.sleep(secs)
         print("💾 Running daily backup...")
         try:
-            await _send_backup()
-            _save_last_backup_date()
+            if await _send_backup():
+                _save_last_backup_date()
         except Exception as e:
             print(f"❌ Backup failed: {e}")
 
