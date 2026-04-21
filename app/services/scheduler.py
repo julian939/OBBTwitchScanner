@@ -5,6 +5,8 @@ from app.database.database import SessionLocal
 from app.services.reconciliation import reconcile_live_states
 from app.services.points import award_live_points, LIVE_POINTS_INTERVAL_MINUTES, EVENT_MULTIPLIER
 from app.services.roles import sync_leaderboard_roles
+from app.integrations.twitch import twitch_api
+from app.database.models import Streamer
 from app.config import get_settings
 
 settings = get_settings()
@@ -182,11 +184,21 @@ async def periodic_live_points():
         try:
             # Check if Discord event is active
             from app.integrations.discord_bot import bot
-            multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
+            event_mult = EVENT_MULTIPLIER if bot.has_active_event() else 1
 
-            awarded = award_live_points(db, multiplier=multiplier)
+            # Fetch viewer counts for all live streamers
+            live_streamer_ids = [
+                s.id for s in db.query(Streamer).filter(Streamer.is_live == True).all()
+            ]
+            try:
+                viewer_counts = twitch_api.get_viewer_counts(live_streamer_ids) if live_streamer_ids else {}
+            except Exception as e:
+                print(f"⚠️ Failed to fetch viewer counts: {e}")
+                viewer_counts = {}
+
+            awarded = award_live_points(db, event_multiplier=event_mult, viewer_counts=viewer_counts)
             if awarded > 0:
-                suffix = f" (x{multiplier} event bonus!)" if multiplier > 1 else ""
+                suffix = f" (x{event_mult} event bonus!)" if event_mult > 1 else ""
                 print(f"💰 Live points awarded: {awarded}{suffix}")
 
                 # Sync leaderboard roles after points awarded

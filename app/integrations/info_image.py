@@ -109,6 +109,7 @@ def render_info(categories, tip="", points_per_min=1, daily_bonus=500,
         ("Daily Bonus", f"{daily_bonus:,} points for first stream of the day"),
         ("Streak Bonus", f"streak days x {streak_multiplier} pts (3+ day streak)"),
         ("Event Bonus", f"points x {event_multiplier} during Discord events"),
+        ("Viewer Bonus", "up to x4 multiplier based on viewer count"),
     ]
     steps = [
         "Use /register with your Twitch username",

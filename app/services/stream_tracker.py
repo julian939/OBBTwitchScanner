@@ -313,11 +313,15 @@ def _close_stream_for_category_change(
     open_stream.duration_minutes = duration_minutes
     old_game = open_stream.game_name or ""
 
-    # Event multiplier
+    # Event multiplier + viewer multiplier (stream is still live)
     try:
         from app.integrations.discord_bot import bot
-        from app.services.points import EVENT_MULTIPLIER
-        multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
+        from app.services.points import EVENT_MULTIPLIER, get_viewer_multiplier
+        from app.integrations.twitch import twitch_api
+        event_mult = EVENT_MULTIPLIER if bot.has_active_event() else 1
+        stream_info = twitch_api.get_stream_info(streamer.id)
+        viewer_mult = get_viewer_multiplier(stream_info["viewer_count"]) if stream_info else 1.0
+        multiplier = event_mult * viewer_mult
     except Exception:
         multiplier = 1
 

@@ -179,4 +179,21 @@ class TwitchAPI:
         }
 
 
+    def get_viewer_counts(self, user_ids: list[str]) -> dict[str, int]:
+        """Get current viewer counts for multiple streamers in one API call."""
+        result = {}
+        # Twitch API supports up to 100 user_ids per request
+        for i in range(0, len(user_ids), 100):
+            batch = user_ids[i:i + 100]
+            response = httpx.get(
+                f"{self.BASE_URL}/streams",
+                params=[("user_id", uid) for uid in batch],
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            for stream in response.json()["data"]:
+                result[stream["user_id"]] = stream.get("viewer_count", 0)
+        return result
+
+
 twitch_api = TwitchAPI()

@@ -17,7 +17,15 @@ LIVE_POINTS_INTERVAL_MINUTES = settings.live_points_interval_minutes
 EVENT_MULTIPLIER = settings.event_multiplier
 
 
-def award_live_points(db: Session, multiplier: int = 1) -> int:
+def get_viewer_multiplier(viewers: int) -> float:
+    if viewers <= 1:
+        return 1.0
+    if viewers >= 20:
+        return min(2.5 + 1.5 * ((viewers - 20) / (viewers - 20 + 30)), 4.0)
+    return 1.0 + 1.5 * ((viewers - 1) / 19)
+
+
+def award_live_points(db: Session, event_multiplier: float = 1, viewer_counts: dict[str, int] | None = None) -> int:
     from app.utils.categories import is_streamer_tracked_live
 
     now = datetime.now(timezone.utc)
@@ -45,7 +53,9 @@ def award_live_points(db: Session, multiplier: int = 1) -> int:
         if elapsed < LIVE_POINTS_INTERVAL_MINUTES:
             continue
 
-        points = elapsed * POINTS_PER_MINUTE * multiplier
+        viewer_mult = get_viewer_multiplier(viewer_counts.get(stream.streamer_id, 0)) if viewer_counts else 1.0
+        multiplier = event_multiplier * viewer_mult
+        points = round(elapsed * POINTS_PER_MINUTE * multiplier)
 
         tx = PointTransaction(
             streamer_id=stream.streamer_id,
@@ -62,7 +72,7 @@ def award_live_points(db: Session, multiplier: int = 1) -> int:
     return total_awarded
 
 
-def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multiplier: int = 1, end_time: datetime | None = None) -> list[PointTransaction]:
+def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multiplier: float = 1, end_time: datetime | None = None) -> list[PointTransaction]:
     transactions = []
     now = end_time or datetime.now(timezone.utc)
 
@@ -75,7 +85,7 @@ def award_stream_end_points(streamer_id: str, stream: Stream, db: Session, multi
     remaining_minutes = int((now - since).total_seconds() / 60)
 
     if remaining_minutes > 0:
-        time_points = remaining_minutes * POINTS_PER_MINUTE * multiplier
+        time_points = round(remaining_minutes * POINTS_PER_MINUTE * multiplier)
         tx = PointTransaction(
             streamer_id=streamer_id,
             points=time_points,
