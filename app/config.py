@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     twitch_client_secret: str
 
     reconciliation_interval_minutes: int = 5
-    tracked_categories: list[str] = ["Oh Baby! Kart", "Shogun Curse", "Bam Bam Boom", "Pawker"]
+    tracked_categories: list[str] = ["Oh Baby! Kart", "Shogun Curse", "Bam Bam Boom", "Pawker", "Torii: Beyond The Gates"]
 
     # Points
     points_per_minute: int = 1
