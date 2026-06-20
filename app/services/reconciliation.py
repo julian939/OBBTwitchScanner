@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -17,6 +18,8 @@ from app.services.stream_tracker import (
     handle_category_change,
 )
 from app.utils.categories import is_tracked_category
+
+logger = logging.getLogger(__name__)
 
 
 def _get_stream_points_summary(stream_id: int, db: Session) -> list:
@@ -45,6 +48,7 @@ def _close_stream_and_notify(streamer, open_stream, now, db):
         from app.services.points import EVENT_MULTIPLIER
         multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
     except Exception:
+        logger.warning("Discord-Eventstatus konnte nicht geprüft werden, Multiplikator=1", exc_info=True)
         multiplier = 1
 
     award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier)
@@ -59,7 +63,11 @@ def _close_stream_and_notify(streamer, open_stream, now, db):
 
     if duration_minutes > 0:
         if _is_offline_too_short(duration_minutes):
-            print(f"⏳ {streamer.display_name} offline notification suppressed ({duration_minutes}min too short)")
+            logger.info(
+                "Offline-Benachrichtigung unterdrückt für %s (%smin zu kurz)",
+                streamer.display_name,
+                duration_minutes,
+            )
         else:
             queue_offline_notification(
                 streamer_id=streamer.id,

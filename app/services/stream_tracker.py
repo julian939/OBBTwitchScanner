@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from app.utils.categories import is_tracked_category
 from app.config import get_settings
 
 _settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def _is_offline_too_short(duration_minutes: int) -> bool:
@@ -49,7 +51,7 @@ def _cancel_pending_offline(streamer_id: str) -> bool:
         timer = _pending_offlines.pop(streamer_id, None)
     if timer:
         timer.cancel()
-        print(f"⏳ Cancelled pending offline for {streamer_id} (reconnect)")
+        logger.info("Pending-Offline für %s abgebrochen (Reconnect)", streamer_id)
         return True
     return False
 
@@ -98,7 +100,7 @@ def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
 
             # If streamer came back online in the meantime → abort
             if streamer.is_live:
-                print(f"⏳ {streamer.display_name} is live again, skipping offline finalization")
+                logger.info("%s ist wieder live, Offline-Finalisierung wird übersprungen", streamer.display_name)
                 return
 
             open_stream = (
@@ -108,12 +110,15 @@ def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
                 .first()
             )
             if not open_stream:
-                print(f"⚠️ No open stream for {streamer.display_name} during finalization (already closed by reconciliation?)")
+                logger.warning(
+                    "Kein offener Stream für %s bei Finalisierung (evtl. bereits durch Reconciliation geschlossen)",
+                    streamer.display_name,
+                )
                 return
 
             # Guard: if ended_at is already set, reconciliation beat us
             if open_stream.ended_at is not None:
-                print(f"⚠️ Stream for {streamer.display_name} already closed, skipping finalization")
+                logger.warning("Stream für %s bereits geschlossen, Finalisierung übersprungen", streamer.display_name)
                 return
 
             started = open_stream.started_at.replace(tzinfo=timezone.utc)
@@ -128,6 +133,7 @@ def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
                 from app.services.points import EVENT_MULTIPLIER
                 multiplier = EVENT_MULTIPLIER if bot.has_active_event() else 1
             except Exception:
+                logger.warning("Discord-Eventstatus konnte in Offline-Finalisierung nicht geprüft werden", exc_info=True)
                 multiplier = 1
 
             award_stream_end_points(streamer_id, open_stream, db, multiplier=multiplier, end_time=offline_at)
@@ -143,12 +149,14 @@ def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
 
             stream_game = open_stream.game_name or ""
 
-            print(f"🔴 {streamer.display_name} offline finalized after {duration_minutes} min")
+            logger.info("Offline finalisiert für %s nach %s min", streamer.display_name, duration_minutes)
 
             if _is_offline_too_short(duration_minutes):
-                print(
-                    f"⏳ {streamer.display_name} offline notification suppressed "
-                    f"({duration_minutes}min < {_settings.notify_offline_min_duration_minutes}min)"
+                logger.info(
+                    "Offline-Benachrichtigung unterdrückt für %s (%smin < %smin)",
+                    streamer.display_name,
+                    duration_minutes,
+                    _settings.notify_offline_min_duration_minutes,
                 )
             else:
                 queue_offline_notification(
@@ -165,9 +173,7 @@ def _finalize_offline(streamer_id: str, offline_at: datetime) -> None:
             schedule_leaderboard_role_sync()
 
         except Exception as e:
-            print(f"❌ Offline finalization error for {streamer_id}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Offline-Finalisierung fehlgeschlagen für %s: %s", streamer_id, e)
         finally:
             db.close()
 
@@ -209,11 +215,11 @@ def handle_stream_online(event: dict, db: Session) -> None:
     game_name = stream_info["game_name"] if stream_info else ""
 
     if streamer.is_locked:
-        print(f"🔒 {streamer_name} is locked, ignoring online event")
+        logger.info("%s ist gesperrt, Online-Event wird ignoriert", streamer_name)
         return
 
     if not is_tracked_category(game_name):
-        print(f"⏭️ {streamer_name} went live in '{game_name}' (untracked)")
+        logger.info("%s ging live in '%s' (untracked)", streamer_name, game_name)
         return
 
     lock = _get_streamer_lock(streamer_id)
@@ -227,7 +233,7 @@ def handle_stream_online(event: dict, db: Session) -> None:
         if existing:
             if existing.game_name == game_name:
                 # Same category → stream continues (reconnect case)
-                print(f"ℹ️ {streamer_name} reconnected, stream continues ({game_name})")
+                logger.info("%s reconnectet, Stream läuft weiter (%s)", streamer_name, game_name)
                 return
             else:
                 # Different category → close old stream, open new one
@@ -237,7 +243,7 @@ def handle_stream_online(event: dict, db: Session) -> None:
         db.add(stream)
         db.commit()
 
-    print(f"🟢 {streamer_name} went live in '{game_name}' at {started_at}")
+    logger.info("%s ging live in '%s' um %s", streamer_name, game_name, started_at)
 
     # Assign live role
     if streamer.discord_id:
@@ -284,13 +290,17 @@ def handle_stream_offline(event: dict, db: Session) -> None:
         .first()
     )
     if not open_stream:
-        print(f"⚠️ No open stream for {streamer.display_name}, just marking offline")
+        logger.warning("Kein offener Stream für %s, nur offline markiert", streamer.display_name)
         return
 
     delay = _settings.notify_offline_delay_minutes * 60
     offline_at = datetime.now(timezone.utc)
     _schedule_offline(streamer_id, delay, offline_at)
-    print(f"⏳ {streamer.display_name} went offline — finalizing in {_settings.notify_offline_delay_minutes}min")
+    logger.info(
+        "%s ging offline, Finalisierung in %smin",
+        streamer.display_name,
+        _settings.notify_offline_delay_minutes,
+    )
 
 
 # ── Category Change ───────────────────────────────────────────
@@ -323,6 +333,7 @@ def _close_stream_for_category_change(
         viewer_mult = get_viewer_multiplier(stream_info["viewer_count"]) if stream_info else 1.0
         multiplier = event_mult * viewer_mult
     except Exception:
+        logger.warning("Discord-Eventstatus konnte beim Category-Change nicht geprüft werden", exc_info=True)
         multiplier = 1
 
     award_stream_end_points(streamer.id, open_stream, db, multiplier=multiplier, end_time=now)
@@ -336,7 +347,13 @@ def _close_stream_for_category_change(
         .scalar() or 0
     )
 
-    print(f"🔄 {streamer.display_name} switched '{old_game}' → '{new_game}' after {duration_minutes}min")
+    logger.info(
+        "%s wechselte von '%s' zu '%s' nach %smin",
+        streamer.display_name,
+        old_game,
+        new_game,
+        duration_minutes,
+    )
 
     if not _is_offline_too_short(duration_minutes):
         queue_offline_notification(
@@ -380,7 +397,7 @@ def handle_category_change(streamer_id: str, new_game: str, db: Session) -> None
                 stream = Stream(streamer_id=streamer_id, started_at=now, game_name=new_game)
                 db.add(stream)
                 db.commit()
-                print(f"🟢 {streamer.display_name} switched to tracked '{new_game}', stream opened")
+                logger.info("%s wechselte zu getracktem '%s', Stream geöffnet", streamer.display_name, new_game)
 
                 stream_info = twitch_api.get_stream_info(streamer_id)
                 queue_live_notification(
@@ -408,7 +425,7 @@ def handle_category_change(streamer_id: str, new_game: str, db: Session) -> None
             stream = Stream(streamer_id=streamer_id, started_at=now, game_name=new_game)
             db.add(stream)
             db.commit()
-            print(f"🟢 {streamer.display_name} new stream opened for '{new_game}'")
+            logger.info("%s neuer Stream für '%s' geöffnet", streamer.display_name, new_game)
 
             stream_info = twitch_api.get_stream_info(streamer_id)
             queue_live_notification(
@@ -422,7 +439,7 @@ def handle_category_change(streamer_id: str, new_game: str, db: Session) -> None
                 started_at=now.isoformat(),
             )
         else:
-            print(f"⏭️ {streamer.display_name} switched to untracked '{new_game}', stream closed")
+            logger.info("%s wechselte zu ungetracktem '%s', Stream geschlossen", streamer.display_name, new_game)
 
 
 # ── Helpers ───────────────────────────────────────────────────

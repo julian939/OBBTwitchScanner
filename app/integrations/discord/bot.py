@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import discord
 from discord import app_commands
@@ -8,6 +9,7 @@ from discord import app_commands
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 class StreamTrackerBot(discord.Client):
@@ -23,6 +25,7 @@ class StreamTrackerBot(discord.Client):
         from app.integrations.discord.commands import register_all
         from app.integrations.discord.notifications import notification_listener
 
+        logger.info("Discord setup_hook gestartet")
         self.tree.clear_commands(guild=None)
         await self.tree.sync()
         register_all(self, self.tree)
@@ -30,10 +33,13 @@ class StreamTrackerBot(discord.Client):
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
         self._notification_task = asyncio.create_task(notification_listener(self))
-        print("✅ Discord commands synced")
+        logger.info("Discord commands synchronisiert")
+
+    async def on_connect(self):
+        logger.info("Discord erfolgreich verbunden")
 
     async def on_ready(self):
-        print(f"🤖 Discord bot connected as {self.user}")
+        logger.info("Discord bot ready als %s", self.user)
 
     def has_active_event(self) -> bool:
         guild = self.get_guild(settings.discord_guild_id)
@@ -51,9 +57,10 @@ bot = StreamTrackerBot()
 async def run_bot():
     token = settings.discord_bot_token
     if not token:
-        print("⚠️ No Discord bot token configured, skipping bot")
+        logger.warning("Discord-Bot-Token fehlt, Bot wird übersprungen")
         return
     try:
+        logger.info("Discord-Bot startet")
         await bot.start(token)
     except Exception as e:
-        print(f"❌ Discord bot error: {e}")
+        logger.exception("Discord-Bot-Fehler: %s", e)

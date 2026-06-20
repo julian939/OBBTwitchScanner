@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import discord
 
@@ -13,6 +14,7 @@ from app.integrations.discord.helpers import cut_title, _square_thumbnail, get_g
 from app.integrations.discord.views import LiveLinkView
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 _MAX_SEND_ATTEMPTS = 3
 _BASE_RETRY_DELAY = 2
@@ -27,12 +29,12 @@ async def _send_with_retry(channel, **kwargs):
             if attempt == _MAX_SEND_ATTEMPTS:
                 raise
             delay = _BASE_RETRY_DELAY * (2 ** (attempt - 1))
-            print(f"⚠️ Discord 5xx error, retry {attempt}/{_MAX_SEND_ATTEMPTS} in {delay}s")
+            logger.warning("Discord 5xx error, retry %s/%s in %ss", attempt, _MAX_SEND_ATTEMPTS, delay)
             await asyncio.sleep(delay)
         except discord.errors.HTTPException as e:
             if e.status == 429 and attempt < _MAX_SEND_ATTEMPTS:
                 delay = getattr(e, 'retry_after', _BASE_RETRY_DELAY * (2 ** (attempt - 1)))
-                print(f"⚠️ Rate limited, retry {attempt}/{_MAX_SEND_ATTEMPTS} in {delay}s")
+                logger.warning("Rate limited, retry %s/%s in %ss", attempt, _MAX_SEND_ATTEMPTS, delay)
                 await asyncio.sleep(delay)
             else:
                 raise
@@ -43,13 +45,13 @@ async def _send_with_retry(channel, **kwargs):
 
 async def notification_listener(bot_instance):
     await bot_instance.wait_until_ready()
-    print(f"📡 Notification listener ready")
+    logger.info("Notification-Listener bereit")
     while True:
         try:
             n = await notification_queue.get()
             channel = get_game_channel(bot_instance, n.game_name)
             if not channel:
-                print(f"⚠️ No channel configured for '{n.game_name}', skipping notification")
+                logger.warning("Kein Channel für '%s' konfiguriert, Benachrichtigung übersprungen", n.game_name)
                 continue
 
             if isinstance(n, LiveNotification):
@@ -61,7 +63,7 @@ async def notification_listener(bot_instance):
                         discord_id = streamer.discord_id
                     db.close()
                 except Exception:
-                    pass
+                    logger.exception("Streamer-Discord-ID konnte für Benachrichtigung nicht geladen werden")
                 embed, thumb_file = await build_live_embed(n, bot_instance, discord_id=discord_id)
                 kwargs = {"embed": embed, "view": LiveLinkView(n.twitch_url)}
                 if thumb_file:
@@ -72,9 +74,7 @@ async def notification_listener(bot_instance):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print(f"❌ Notification error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Notification-Fehler: %s", e)
 
 
 async def build_live_embed(n, bot_instance, discord_id=None):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -61,9 +64,9 @@ def queue_live_notification(
 
     try:
         notification_queue.put_nowait(notification)
-        print(f"📨 Queued live notification for {streamer_display_name}")
+        logger.info("Live-Benachrichtigung in Queue gestellt für %s", streamer_display_name)
     except Exception as e:
-        print(f"❌ Failed to queue notification: {e}")
+        logger.exception("Live-Benachrichtigung konnte nicht gequeued werden: %s", e)
 
 
 def queue_offline_notification(
@@ -91,6 +94,6 @@ def queue_offline_notification(
 
     try:
         notification_queue.put_nowait(notification)
-        print(f"📨 Queued offline notification for {streamer_display_name}")
+        logger.info("Offline-Benachrichtigung in Queue gestellt für %s", streamer_display_name)
     except Exception as e:
-        print(f"❌ Failed to queue notification: {e}")
+        logger.exception("Offline-Benachrichtigung konnte nicht gequeued werden: %s", e)

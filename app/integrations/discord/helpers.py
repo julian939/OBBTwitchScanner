@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from datetime import datetime, timezone
 
@@ -10,6 +11,7 @@ from app.config import get_settings
 from app.database.models import Stream
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def random_tip() -> str:
@@ -164,4 +166,5 @@ async def _square_thumbnail(url: str, top_padding: int = 20) -> discord.File | N
         buf.seek(0)
         return discord.File(buf, filename="thumb.png")
     except Exception:
+        logger.warning("Thumbnail konnte nicht erstellt werden", exc_info=True)
         return None

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import io
+import logging
 
 import discord
 from discord import ui
+
+logger = logging.getLogger(__name__)
 
 
 class LiveLinkView(ui.View):
@@ -39,7 +42,7 @@ class PaginatorView(ui.View):
                 else:
                     await self.message.edit(view=None)
             except Exception:
-                pass
+                logger.debug("Paginator konnte beim Timeout nicht aktualisiert werden", exc_info=True)
 
     async def _edit(self, interaction):
         if self.image_bytes:

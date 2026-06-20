@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 import discord
@@ -13,6 +14,7 @@ from app.integrations.discord.constants import ACCENT, OFFLINE_GRAY
 from app.integrations.discord.helpers import is_admin
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 class RegisterModal(ui.Modal, title="Register as Streamer"):
@@ -134,7 +136,7 @@ class RegisterModal(ui.Modal, title="Register as Streamer"):
                     )
                     await channel.send(content=mentions or None, embed=admin_embed, view=review_view)
                 except Exception:
-                    pass
+                    logger.exception("Admin-Benachrichtigung für Registrierungsanfrage fehlgeschlagen")
 
         except Exception as e:
             await interaction.followup.send(f"```diff\n- Error: {e}\n```", ephemeral=True)
@@ -261,6 +263,6 @@ async def _send_registration_dm(guild, discord_id: str, approved: bool, twitch_n
 
         await member.send(embed=embed)
     except discord.Forbidden:
-        print(f"⚠️ Cannot DM user {discord_id} (DMs disabled)")
+        logger.warning("Kann User %s nicht per DM erreichen (DMs deaktiviert)", discord_id)
     except Exception as e:
-        print(f"❌ Failed to send registration DM: {e}")
+        logger.exception("Registrierungs-DM konnte nicht gesendet werden: %s", e)

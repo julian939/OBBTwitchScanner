@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from app.integrations.discord.commands import (
     register as _register_mod,
     live,
@@ -10,13 +12,13 @@ from app.integrations.discord.commands import (
     admin_cmd,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def register_all(bot, tree):
     @tree.error
     async def on_error(interaction, error):
-        print(f"❌ Command error: {error}")
-        import traceback
-        traceback.print_exception(type(error), error, error.__traceback__)
+        logger.exception("Discord-Commandfehler: %s", error)
         if not interaction.response.is_done():
             await interaction.response.send_message("An error occurred.", ephemeral=True)
 

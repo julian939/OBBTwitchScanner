@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import json
 from fastapi import APIRouter, Request, Response, Depends, HTTPException
 from starlette.requests import ClientDisconnect
@@ -13,6 +14,7 @@ from app.services.stream_tracker import handle_stream_online, handle_stream_offl
 
 settings = get_settings()
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/webhook/twitch")
@@ -29,7 +31,7 @@ async def twitch_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         body_bytes = await request.body()
     except ClientDisconnect:
-        print("⚠️ Twitch webhook: client disconnected before body was read")
+        logger.warning("Twitch webhook: Client vor Body-Read getrennt")
         return Response(status_code=200)
 
     # Validate headers

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -9,6 +10,7 @@ from app.config import get_settings
 from app.database.models import Streamer, PointTransaction
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -23,15 +25,18 @@ def _get_bot():
 
 def _run_coro(coro):
     """Schedule a coroutine on the bot's event loop (non-blocking)."""
+    scheduled = False
     try:
         bot = _get_bot()
         if bot.loop and bot.loop.is_running():
             asyncio.run_coroutine_threadsafe(coro, bot.loop)
+            scheduled = True
             return
     except Exception:
-        pass
+        logger.exception("Konnte Coroutine nicht auf Discord-Loop schedulen")
     # Coroutine was never scheduled — close it to suppress RuntimeWarning
-    coro.close()
+    if not scheduled:
+        coro.close()
 
 
 def _get_guild():
@@ -47,6 +52,7 @@ async def _get_member(guild, discord_id: str):
         try:
             member = await guild.fetch_member(int(discord_id))
         except Exception:
+            logger.warning("Konnte Discord-Mitglied %s nicht fetchen", discord_id, exc_info=True)
             return None
     return member
 
@@ -215,6 +221,6 @@ def schedule_leaderboard_role_sync():
             finally:
                 db.close()
         except Exception as e:
-            print(f"⚠️ Leaderboard role sync failed: {e}")
+            logger.exception("Leaderboard-Rollensync fehlgeschlagen: %s", e)
 
     _run_coro(_do())
