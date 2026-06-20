@@ -28,8 +28,9 @@ def _run_coro(coro):
     scheduled = False
     try:
         bot = _get_bot()
-        if bot.loop and bot.loop.is_running():
-            asyncio.run_coroutine_threadsafe(coro, bot.loop)
+        loop = getattr(bot, "dispatch_loop", None)
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, loop)
             scheduled = True
             return
     except Exception:

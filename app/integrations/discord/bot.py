@@ -20,12 +20,14 @@ class StreamTrackerBot(discord.Client):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self._notification_task = None
+        self.dispatch_loop: asyncio.AbstractEventLoop | None = None
 
     async def setup_hook(self):
         from app.integrations.discord.commands import register_all
         from app.integrations.discord.notifications import notification_listener
 
         logger.info("Discord setup_hook gestartet")
+        self.dispatch_loop = asyncio.get_running_loop()
         self.tree.clear_commands(guild=None)
         await self.tree.sync()
         register_all(self, self.tree)
