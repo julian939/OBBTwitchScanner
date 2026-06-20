@@ -40,20 +40,29 @@ async def lifespan(app: FastAPI):
 
             streamers = db.query(Streamer).all()
             created = 0
+            failed = 0
             for st in streamers:
                 for event_type in ["stream.online", "stream.offline"]:
-                    result = twitch_api.create_eventsub_subscription(event_type, st.id)
-                    if result.get("status") != "already_exists":
-                        sub = Subscription(
-                            id=result["id"],
-                            streamer_id=st.id,
-                            type=event_type,
-                            status=result["status"],
+                    try:
+                        result = twitch_api.create_eventsub_subscription(event_type, st.id)
+                        if result.get("status") != "already_exists":
+                            sub = Subscription(
+                                id=result["id"],
+                                streamer_id=st.id,
+                                type=event_type,
+                                status=result["status"],
+                            )
+                            db.add(sub)
+                            created += 1
+                    except Exception:
+                        failed += 1
+                        logger.exception(
+                            "EventSub-Subscription fehlgeschlagen für streamer_id=%s event_type=%s",
+                            st.id,
+                            event_type,
                         )
-                        db.add(sub)
-                        created += 1
             db.commit()
-            logger.info("EventSub-Subscriptions erstellt: %s", created)
+            logger.info("EventSub-Subscriptions erstellt: %s, fehlgeschlagen: %s", created, failed)
 
             from app.services.reconciliation import reconcile_live_states
             result = reconcile_live_states(db)

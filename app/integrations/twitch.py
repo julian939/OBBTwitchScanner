@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
@@ -7,6 +9,7 @@ from dataclasses import dataclass
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -114,7 +117,16 @@ class TwitchAPI:
         if response.status_code == 409:
             return {"status": "already_exists"}
 
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            logger.error(
+                "Twitch EventSub create failed: status=%s body=%s payload=%s",
+                response.status_code,
+                response.text,
+                payload,
+            )
+            raise
         return response.json()["data"][0]
 
     def delete_eventsub_subscription(self, subscription_id: str) -> bool:
