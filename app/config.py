@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     discord_game_channels: dict[str, int] = {}
     discord_backup_channel_id: int = 0
     backup_hour: int = 3  # Hour (0-23) at which the daily backup is sent
-    backup_storage_path: str = ""  # Directory for .last_backup file (e.g. /data on Railway)
+    backup_storage_path: str = ""  # Directory for .last_backup so backups survive restarts
     discord_footer_tips: list[str] = [
         "Use /register to become a tracked streamer.",
         "Use /live to see who's currently streaming.",

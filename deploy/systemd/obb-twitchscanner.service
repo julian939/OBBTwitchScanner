@@ -1,0 +1,19 @@
+[Unit]
+Description=OBB Twitch Scanner
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/OBBTwitchScanner
+EnvironmentFile=/opt/OBBTwitchScanner/.env
+ExecStart=/opt/OBBTwitchScanner/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
