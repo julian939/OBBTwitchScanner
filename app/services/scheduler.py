@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
+
 from app.database.database import SessionLocal
 from app.services.reconciliation import reconcile_live_states
 from app.services.points import award_live_points, LIVE_POINTS_INTERVAL_MINUTES, EVENT_MULTIPLIER
@@ -12,6 +15,27 @@ from app.config import get_settings
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+
+@lru_cache()
+def _backup_timezone():
+    from zoneinfo import ZoneInfo
+
+    try:
+        return ZoneInfo(settings.backup_timezone)
+    except Exception:
+        logger.warning("Ungültige backup_timezone=%s, fallback auf UTC", settings.backup_timezone, exc_info=True)
+        return timezone.utc
+
+
+def _backup_now(utc_now: datetime | None = None) -> datetime:
+    """Return the current time in the backup timezone."""
+    utc_now = utc_now or datetime.now(timezone.utc)
+    return utc_now.astimezone(_backup_timezone())
+
+
+def _backup_today(utc_now: datetime | None = None) -> date:
+    return _backup_now(utc_now).date()
 
 
 async def periodic_reconciliation():
@@ -83,12 +107,9 @@ def _last_backup_path() -> str:
 
 def _seconds_until_hour(hour: int) -> float:
     """Return seconds until the next occurrence of the given hour (today or tomorrow)."""
-    from datetime import datetime
-    now = datetime.now()
+    now = _backup_now()
     target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     if target <= now:
-        # Already past today's target — aim for tomorrow
-        from datetime import timedelta
         target += timedelta(days=1)
     return (target - now).total_seconds()
 
@@ -107,8 +128,8 @@ def _last_backup_date() -> str | None:
 
 
 def _save_last_backup_date():
-    from datetime import date
-    open(_last_backup_path(), "w").write(date.today().isoformat())
+    with open(_last_backup_path(), "w") as f:
+        f.write(_backup_today().isoformat())
 
 
 async def _send_backup() -> bool:
@@ -153,14 +174,12 @@ async def _send_backup() -> bool:
 
 async def periodic_backup():
     """Daily: send SQLite DB backup at the configured hour. Catches up missed backups after restarts."""
-    from datetime import date
-    logger.info("Scheduler-Task gestartet: backup (hour=%s)", settings.backup_hour)
+    logger.info("Scheduler-Task gestartet: backup (hour=%s, tz=%s)", settings.backup_hour, settings.backup_timezone)
 
     # On startup: check if today's backup was already sent
     last = _last_backup_date()
-    today = date.today().isoformat()
-    import datetime as dt
-    already_past = dt.datetime.now().hour >= settings.backup_hour
+    today = _backup_today().isoformat()
+    already_past = _backup_now().hour >= settings.backup_hour
 
     if last != today and already_past:
         logger.info("Verpasstes Backup erkannt, sende jetzt")
@@ -172,7 +191,12 @@ async def periodic_backup():
 
     while True:
         secs = _seconds_until_hour(settings.backup_hour)
-        logger.info("Nächstes Backup in %.1fh (um %02d:00)", secs / 3600, settings.backup_hour)
+        logger.info(
+            "Nächstes Backup in %.1fh (um %02d:00 %s)",
+            secs / 3600,
+            settings.backup_hour,
+            settings.backup_timezone,
+        )
         await asyncio.sleep(secs)
         logger.info("Tägliches Backup gestartet")
         try:
