@@ -132,19 +132,17 @@ def _save_last_backup_date():
         f.write(_backup_today().isoformat())
 
 
-async def _send_backup() -> bool:
-    """Send the SQLite DB file to the configured Discord backup channel. Returns True on success."""
+async def _perform_backup() -> bool:
+    """Perform database backup locally and/or send to Discord. Returns True if successful."""
     import os
-    import discord
-
-    if not settings.discord_backup_channel_id:
-        logger.warning("Backup übersprungen: discord_backup_channel_id nicht konfiguriert")
-        return False
-
-    from app.integrations.discord_bot import bot
-    await bot.wait_until_ready()
+    import shutil
+    import glob
 
     db_url = settings.database_url
+    if "sqlite" not in db_url:
+        logger.warning("Backups werden nur für SQLite-Datenbanken unterstützt (database_url=%s)", db_url)
+        return False
+
     db_path = db_url.replace("sqlite:///", "", 1)
     if not os.path.isabs(db_path):
         db_path = os.path.join(os.getcwd(), db_path)
@@ -153,23 +151,61 @@ async def _send_backup() -> bool:
         logger.error("Backup fehlgeschlagen: DB nicht gefunden unter %s", db_path)
         return False
 
-    size_mb = os.path.getsize(db_path) / (1024 * 1024)
-    if size_mb > 24:
-        logger.error("Backup fehlgeschlagen: DB zu groß (%.1f MB)", size_mb)
-        return False
+    local_success = False
+    discord_success = False
 
-    try:
-        channel = bot.get_channel(settings.discord_backup_channel_id) or await bot.fetch_channel(settings.discord_backup_channel_id)
-    except Exception:
-        logger.exception("Backup fehlgeschlagen: Channel %s nicht gefunden", settings.discord_backup_channel_id)
-        return False
+    # 1. Local backup copy
+    if settings.backup_storage_path:
+        try:
+            os.makedirs(settings.backup_storage_path, exist_ok=True)
+            today_str = _backup_today().isoformat()
+            backup_filename = f"stream_tracker_{today_str}.db"
+            local_backup_path = os.path.join(settings.backup_storage_path, backup_filename)
 
-    await channel.send(
-        content=f"Daily backup · `{size_mb:.2f} MB`",
-        file=discord.File(db_path, filename="stream_tracker.db"),
-    )
-    logger.info("Backup an Channel %s gesendet", settings.discord_backup_channel_id)
-    return True
+            # Copy database file
+            shutil.copy2(db_path, local_backup_path)
+            logger.info("Lokales Backup erstellt unter %s", local_backup_path)
+            local_success = True
+
+            # Rotation: keep last 7 backups matching stream_tracker_*.db
+            pattern = os.path.join(settings.backup_storage_path, "stream_tracker_*.db")
+            backup_files = sorted(glob.glob(pattern))
+            if len(backup_files) > 7:
+                files_to_delete = backup_files[:-7]
+                for f in files_to_delete:
+                    try:
+                        os.remove(f)
+                        logger.info("Altes Backup gelöscht: %s", f)
+                    except Exception as e:
+                        logger.warning("Fehler beim Löschen des alten Backups %s: %s", f, e)
+        except Exception:
+            logger.exception("Lokales Backup fehlgeschlagen")
+
+    # 2. Discord backup
+    if settings.discord_backup_channel_id:
+        try:
+            import discord
+            from app.integrations.discord_bot import bot
+
+            await bot.wait_until_ready()
+
+            size_mb = os.path.getsize(db_path) / (1024 * 1024)
+            if size_mb > 24:
+                logger.error("Discord-Backup fehlgeschlagen: DB zu groß (%.1f MB)", size_mb)
+            else:
+                channel = bot.get_channel(settings.discord_backup_channel_id) or await bot.fetch_channel(settings.discord_backup_channel_id)
+                await channel.send(
+                    content=f"Daily backup · `{size_mb:.2f} MB`",
+                    file=discord.File(db_path, filename="stream_tracker.db"),
+                )
+                logger.info("Backup an Discord-Channel %s gesendet", settings.discord_backup_channel_id)
+                discord_success = True
+        except Exception:
+            logger.exception("Discord-Backup fehlgeschlagen")
+
+    # Success if at least one target succeeded.
+    # Note: If neither is configured, we return False to avoid saving a .last_backup.
+    return local_success or discord_success
 
 
 async def periodic_backup():
@@ -182,9 +218,9 @@ async def periodic_backup():
     already_past = _backup_now().hour >= settings.backup_hour
 
     if last != today and already_past:
-        logger.info("Verpasstes Backup erkannt, sende jetzt")
+        logger.info("Verpasstes Backup erkannt, starte jetzt")
         try:
-            if await _send_backup():
+            if await _perform_backup():
                 _save_last_backup_date()
         except Exception as e:
             logger.exception("Catch-up-Backup fehlgeschlagen: %s", e)
@@ -200,7 +236,7 @@ async def periodic_backup():
         await asyncio.sleep(secs)
         logger.info("Tägliches Backup gestartet")
         try:
-            if await _send_backup():
+            if await _perform_backup():
                 _save_last_backup_date()
         except Exception as e:
             logger.exception("Backup fehlgeschlagen: %s", e)
