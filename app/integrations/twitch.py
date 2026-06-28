@@ -95,11 +95,14 @@ class TwitchAPI:
         broadcaster_user_id: str
     ) -> dict:
         """Erstellt EventSub Subscription."""
+        if not (10 <= len(settings.webhook_secret) <= 100):
+            raise ValueError("webhook_secret must be between 10 and 100 characters long")
+
         payload = {
             "type": event_type,
             "version": "1",
             "condition": {
-                "broadcaster_user_id": broadcaster_user_id
+                "broadcaster_user_id": str(broadcaster_user_id)
             },
             "transport": {
                 "method": "webhook",

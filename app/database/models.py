@@ -55,7 +55,7 @@ class Subscription(Base):
     __tablename__ = "subscriptions"
 
     id = Column(String, primary_key=True)
-    streamer_id = Column(Integer, ForeignKey("streamers.id"), index=True)
+    streamer_id = Column(String, ForeignKey("streamers.id"), index=True)
     type = Column(String)
     status = Column(String, default="enabled")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
